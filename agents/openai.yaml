@@ -1,0 +1,6 @@
+interface:
+  display_name: "Daily News Picker"
+  short_description: "인천교육청 언론보도 선별, 중복 제거, 근거 검증형 일일 브리핑"
+  default_prompt: "Use $daily-news-picker to collect, read, deduplicate, rank, verify, and summarize recent news about the Incheon Metropolitan Office of Education and its affiliates."
+policy:
+  allow_implicit_invocation: true

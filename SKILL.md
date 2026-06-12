@@ -1,0 +1,105 @@
+---
+name: daily-news-picker
+description: Select, rank, and summarize daily news about the Incheon Metropolitan Office of Education, its district offices of education, and affiliated institutions. Use when the user asks with triggers like `뉴스/`, asks for today's news, recent press coverage, media monitoring, headline picking, briefing drafts, or issue scanning related to 인천광역시교육청, 교육지원청, 직속기관, 학생교육원, 연수원, 도서관, 수련원, or other affiliated education bodies. Default cadence is a weekday 7:00 AM press coverage check, excluding weekends and public holidays unless the user asks otherwise.
+metadata:
+  short-description: 인천교육청 언론보도 선별, 중복 제거, 일일 브리핑
+---
+
+# Daily News Picker
+
+## Overview
+
+Collect recent news about 인천광역시교육청 and its affiliated organizations, remove weak or duplicate items, and produce a short briefing ordered by operational importance.
+
+For institution scope and example entities, read [references/institution-scope.md](./references/institution-scope.md).
+
+This skill should be treated as a default daily monitoring skill, not only an explicit `$daily-news-picker` command skill.
+
+Default operating rule:
+
+- 기준 시각: 평일 오전 7시
+- 기준 범위: 직전 점검 이후 누적된 언론보도 현황
+- 제외일: 토요일, 일요일, 공휴일
+- 별도 지시가 없으면 위 기준을 적용
+- 결과 저장: `md`와 `html` 두 형식으로 함께 저장
+- 날짜별 저장 폴더: `인천교육청 언론보도 현황(YYYYMMDD)` 형식 사용
+- 기본 기대 동작: 별도 명령이 없어도 일일 뉴스 점검 작업에 우선 적용
+
+## Quick Start
+
+Use this skill when the user asks for things like:
+
+- "뉴스/ 인천교육청"
+- "뉴스/ 학생교육원"
+- "오늘 인천광역시교육청 뉴스 골라줘"
+- "최근 교육지원청 기사만 추려줘"
+- "학생교육원 관련 언론보도 브리핑 만들어줘"
+- "직속기관 이슈를 아침 보고용으로 정리해줘"
+
+Always browse because news freshness matters.
+
+## Workflow
+
+Use the deep-research pattern in a faster news-monitoring form:
+
+1. Confirm the time window from the user request.
+   If the user gives no separate 기간 조건, use the current business day 7:00 AM check window.
+   If the user says `오늘`, `어제`, `이번 주`, or `최근`, restate it with exact dates.
+   If the request date is a weekend or public holiday, say that the default briefing is skipped unless the user explicitly requests a manual run.
+2. Search recent coverage with official institution names first.
+   Start with the main office, then district offices, then affiliated institutions that fit the request.
+   Use the verified query set and retry/anti-fabrication rules in [references/search-recipes.md](./references/search-recipes.md);
+   do not use multi-institution `OR` queries or local-newspaper section URLs (both empirically broken, see the recipe file).
+3. Read the actual article or official source page before selecting it.
+   Do not rely only on headlines, portal snippets, or syndicated summaries.
+4. Prioritize primary and official sources.
+   Prefer official press releases, institution notices, and clearly attributed local or national news coverage.
+5. De-duplicate aggressively.
+   Merge syndicated or near-identical stories into one item unless headlines imply materially different angles.
+6. Rank items by reporting value.
+   Put policy decisions, budget issues, safety incidents, personnel matters, audits, institutional openings/closures, and student-impacting changes above routine 행사 coverage.
+7. Run follow-up checks for high-ranked or risky items.
+   Re-search 기관명, 날짜, 사업명, and 핵심 쟁점 when the first source leaves ambiguity.
+8. Search outline gaps before writing.
+   If the briefing needs `핵심 요약`, `선별 기사`, or `제외/참고`, make sure each section has evidence or a clear `확인 필요` note.
+9. Run a source/date audit.
+   Check article dates, source links, institution names, duplicate status, and whether each selected item is inside the requested period.
+10. Write a compact briefing.
+   Include date, outlet, title, why it matters, and a source link for each picked item.
+11. Save the result files.
+   Create a dated folder in the `인천교육청 언론보도 현황(YYYYMMDD)` format and store both the Markdown file and the HTML file in that folder.
+
+## Source Priority
+
+Use linked, directly relevant coverage first. For detailed source priority, selection, output, save, and edge-case rules, read [references/selection-output-rules.md](references/selection-output-rules.md).
+
+## Selection, Output, And Save Rules
+
+Use [references/selection-output-rules.md](references/selection-output-rules.md) for selection filters, output structure, save naming, and no-result handling.
+
+## Automation Note
+
+- This skill is intended to run by default for daily news monitoring without requiring an explicit trigger phrase each time.
+- However, automatic day-by-day file creation requires an external scheduler or workflow runner.
+- If no scheduler is configured, the skill can still be invoked implicitly during relevant news-monitoring tasks, but it cannot guarantee unattended daily generation on its own.
+- The bundled runner keeps `run.log` status lines and removes empty partial outputs on failure.
+- Broad Codex bypass mode should be treated as an explicit opt-in for automation, not a default.
+
+## Writing Rules
+
+- Write in Korean unless the user asks otherwise.
+- Prefer concise administrative briefing tone.
+- Distinguish facts from inference.
+- If relevance is uncertain, say why it is borderline.
+- If a requested institution cannot be confirmed from reporting, say that explicitly rather than stretching scope.
+
+## Institution Handling
+
+- Treat `인천광역시교육청` as the top-level institution.
+- Include 산하 교육지원청 and 직속기관 when they are named explicitly or clearly fall within the user request.
+- If the user says only `인천교육청`, include both 본청 and obviously affiliated bodies, but keep the ranking centered on institution-level importance.
+- If the user asks for a narrower subset such as `학생교육원만`, filter strictly.
+
+## Edge Cases
+
+For no-result, mixed-source, and developing-story handling, use [references/selection-output-rules.md](references/selection-output-rules.md).
