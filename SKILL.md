@@ -85,6 +85,12 @@ Use the deep-research pattern in a faster news-monitoring form:
 11. Save the result files.
    Create a dated folder in the `인천교육청 언론보도 현황(YYYYMMDD)` format and store both the Markdown file and the HTML file in that folder.
 
+## Coverage Tracking Mode (역방향 게재 추적)
+
+When the user asks how many outlets actually published a specific distributed press release (e.g. "이 보도자료 어디 실렸어?", "게재 추적", "게재 현황"), switch to reverse tracking.
+Input is the release 제목 + 배포일 + 핵심어, not a date-window collection.
+The key inversion: this mode **includes** press-release reprints as coverage results (the opposite of the default daily mode, which demotes them). For the full procedure, window, classification, and output format, read [references/coverage-tracking.md](./references/coverage-tracking.md).
+
 ## Source Priority
 
 Use linked, directly relevant coverage first. For detailed source priority, selection, output, save, and edge-case rules, read [references/selection-output-rules.md](references/selection-output-rules.md).
