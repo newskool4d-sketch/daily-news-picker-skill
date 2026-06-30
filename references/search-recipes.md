@@ -22,10 +22,58 @@ https://r.jina.ai/https://search.naver.com/search.naver?where=news&query={검색
 | Q1 | `인천교육청` | 본청·교육감·시교육청 표기 전반 (네이버 형태소 매칭으로 `인천시교육청` 포함) | ✅ 2026-06-12 작동 확인 |
 | Q2 | `인천교육지원청` | 5개 교육지원청 (개별 명칭 `인천북부교육지원청` 등 포함 매칭) | ✅ 작동 (간헐 오류 → 재시도 규칙 적용) |
 | Q3 | `인천 학생교육원` | 학생교육원 (사용자 소속 기관, 최우선 커버리지) | ✅ 2026-06-12 작동 확인 |
-| Q4 | `인천 AI융합교육원` | 직속기관 보강 (필요 시 `인천 교육연수원`, `인천교육청 도서관` 등 동일 패턴으로 추가) | 패턴 동일 — Q3와 같은 AND 방식 |
+| Q4 | `인천교육감` | 교육감 동정·인사·외부직위(예: 학교체육진흥회 이사장)는 본청 키워드로 누락 가능 → 별도 확인 | ✅ 2026-06-26 실측(스포츠조선) |
+
+### Q5 직속기관·도서관 개별 쿼리 (필수 루프 — 생략 금지)
+
+직속기관·도서관은 본청/지원청 키워드로 매칭되지 않고 **개별 기관명만으로** 보도되는 사례가 많다.
+2026-06-26~30 실측에서 평생학습관·동아시아국제교육원·유아교육진흥원·난정평화교육원·주안/연수/중앙도서관이
+각각 개별 명칭만으로 기자 명의 보도됨. 따라서 아래 쿼리는 "필요 시 추가"가 아니라 **매 영업일 필수 루프**다.
+전 기관 목록은 [institution-scope.md](./institution-scope.md)를 기준으로 하고, 최소 다음을 매번 확인한다:
+
+```text
+인천 AI융합교육원        인천 교육연수원          인천 학생교육문화회관
+인천 평생학습관          인천 유아교육진흥원      인천 동아시아국제교육원
+인천 난정평화교육원      인천 교직원수련원        인천 학교지원단
+인천교육청 중앙도서관    인천교육청 주안도서관    인천교육청 부평도서관
+인천교육청 연수도서관    인천교육청 계양도서관    인천교육청 화도진도서관
+인천교육청 서구도서관    인천교육청 신트리도서관
+```
+
+후보가 적은 날에도 Q5 루프를 끝까지 돌린 뒤에야 `확인된 유의미 기사 없음`을 쓸 수 있다.
 
 검색 도구가 Jina/직접 fetch가 아닌 내장 웹 검색(`codex exec --search` 등)일 때도
 **동일한 검색어 세트**를 사용하고, 날짜 조건은 검색어에 기간을 명시하거나 결과에서 날짜를 검수한다.
+
+## 2차 필수 쿼리: 모니터링 매체 도메인 확인
+
+기관명 검색만으로는 기사 수가 과소 수집될 수 있다. 특히 사용자가 참고 링크로 알려준 매체는
+우리교육청이 참고하는 매체 풀이라는 의미이므로, 단순 예시가 아니라 수집 대상 도메인으로 취급한다.
+
+1차 쿼리 뒤에는 [media-sources.md](./media-sources.md)의 `Required Source-Seed Domains`를 확인한다.
+이 단계의 목적은 `ice.go.kr` 보도자료가 아니라 언론사 원 기사 URL을 찾는 것이다.
+공식 교육청 페이지는 사실 확인과 원문 추적용으로만 쓰고, 외부 기사 링크가 있으면 대표 링크로 쓰지 않는다.
+
+기본 패턴:
+
+```text
+site:{domain} 인천교육청 {DS}..{DE}
+site:{domain} 인천시교육청 {DS}..{DE}
+site:{domain} 인천광역시교육청 {DS}..{DE}
+```
+
+검색 도구가 날짜 범위를 지원하지 않으면 검색어에 `YYYY.MM.DD`, `YYYY-MM-DD`, `6월 15일` 등 날짜 표현을 추가하고,
+결과를 열어 기사 입력일을 직접 검수한다.
+
+저수집·저선별 방지 규칙:
+
+- 정상 영업일 브리핑은 상위 5건 선별물이 아니라 당일 주요 언론보도 전체 현황이다.
+- 후보가 적거나 본청 기사만 보이면, 최종 작성 전에 모니터링 매체 도메인 확인을 반드시 수행한다.
+- 도메인별 결과가 중복·전재 기사뿐이어도 조용히 버리지 말고 `제외 또는 참고`에 대표적으로 남긴다.
+- `site:` 검색으로 찾은 기사도 반드시 원문 URL과 기사일을 확인한다.
+- `ice.go.kr` 공식 보도자료가 먼저 발견되더라도 같은 사안의 외부 원 기사 링크를 추가 검색한다.
+- 순위는 출력 순서를 정하기 위한 기준이며, 관련 기사 수를 5건 등으로 제한하는 기준이 아니다.
+- 새 참고 링크가 관찰되면 도메인을 [media-sources.md](./media-sources.md)에 추가한다.
 
 ## 재시도 규칙
 
@@ -47,15 +95,18 @@ https://r.jina.ai/https://search.naver.com/search.naver?where=news&query={검색
 - 결과가 없으면 "검색 결과가 없습니다"로 솔직하게 표기한다.
 - 수록 전 URL이 실제 기사 원문으로 연결되는지 확인한다. 404·리다이렉트 의심 URL만 추가 fetch로 검증하고, 검증 실패 URL은 제외한다.
 
-## 관찰된 보도 매체 명단 (2026-06-12 기준)
+## 모니터링 매체 명단
 
-실제 인천교육청 계열 보도가 확인된 매체. 새 매체가 관찰되면 이 표에 추가한다.
-이 명단은 **참고용 식별 보조**이며 화이트리스트가 아니다 — 명단 밖이어도 기자 명의의 공신력 있는 기사면 수록 가능.
+필수 확인 매체와 도메인 쿼리는 [media-sources.md](./media-sources.md)를 기준으로 한다.
+아래 표는 2026-06-30 기준 관찰된 보도 매체의 요약이며, 운영 중 새 매체가 관찰되면
+[media-sources.md](./media-sources.md)에 먼저 추가한다.
+이 명단은 **수집 커버리지 보조**이며 품질 화이트리스트가 아니다 — 명단 밖이어도 기자 명의의 공신력 있는 기사면 수록 가능.
 
 | 분류 | 매체 (도메인) |
 |---|---|
-| 통신사·전국지 | 연합뉴스(yna.co.kr), 문화일보(munhwa.com), 서울신문(seoul.co.kr), 신아일보(shinailbo.co.kr) |
-| 경인·인천 지역지 | 경인일보(kyeongin.com), 경기일보(kyeonggi.com), 기호일보(kihoilbo.co.kr), 인천일보(incheonilbo.com), 인천투데이(incheontoday.com), 인천in(incheonin.com), 경인매일(kmaeil.com), 경기매일(kgmail.kr), 경인신문(asn24.com) |
+| 통신사·전국지 | 연합뉴스(yna.co.kr), 문화일보(munhwa.com), 서울신문(seoul.co.kr), 신아일보(shinailbo.co.kr), 세계일보(segye.com), 매일일보(m-i.kr), 스포츠조선(sportschosun.com), 컨슈머타임스(cstimes.com) |
+| 교육·전문 전국지 | 전자신문 에듀플러스(etnews.com), 한국강사신문(lecturernews.com) |
+| 경인·인천 지역지 | 경인일보(kyeongin.com), 경기일보(kyeonggi.com), 기호일보(kihoilbo.co.kr), 인천일보(incheonilbo.com), 인천투데이(incheontoday.com), 인천in(incheonin.com), 경인매일(kmaeil.com), 경기매일(kgmail.kr), 경인신문(asn24.com), 중부일보(joongboo.com), 경기헤드라인(gheadline.co.kr) |
 | 방송·케이블 | LG헬로비전(news.lghellovision.net), SK브로드밴드(news.skbroadband.com), 팍스경제TV(paxetv.com), 지상파·종편 전국 방송 |
-| 인터넷·전문 | 국제뉴스(gukjenews.com), 문화저널21(mhj21.com), 뉴스프리존(newsfreezone.co.kr), 미디어투데이(mediatoday.asia), 뉴스타운(newstown.co.kr), 웹이코노미(webeconomy.co.kr), 세계타임즈(thesegye.com), 케이에스피뉴스(kspnews.com), 한국강사신문(lecturernews.com), 로이슈(lawissue.co.kr) |
+| 인터넷·전문 | 국제뉴스(gukjenews.com), 문화저널21(mhj21.com), 뉴스프리존(newsfreezone.co.kr), 미디어투데이(mediatoday.asia), 뉴스타운(newstown.co.kr), 웹이코노미(webeconomy.co.kr), 세계타임즈(thesegye.com), 케이에스피뉴스(kspnews.com), 로이슈(lawissue.co.kr), 엔디엔뉴스(ndnnews.co.kr), 더코리아(thekorea.kr), 디스커버리뉴스(discoverynews.kr), 뉴스뷰(newsview.co.kr), 서프라이즈뉴스(surprisenews.kr), 연합시민의소리(cunews.net) |
 | 배제 | 블로그, 카페, 나무위키, 개인 SNS 등 비공신력 출처 |
