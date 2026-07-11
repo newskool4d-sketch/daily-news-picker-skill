@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BasePath = $env:DAILY_NEWS_OUTPUT_DIR,
     [string]$WorkingRoot = $env:USERPROFILE,
     [string]$CodexCommand = $(if (Test-Path (Join-Path $env:APPDATA "npm\codex.cmd")) { Join-Path $env:APPDATA "npm\codex.cmd" } else { "codex" }),
@@ -13,6 +13,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# 파일 쓰기 표준: UTF-8 무BOM (C-1 인코딩 정책, codex-cleanup-plan 2026-07-05)
+$script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 if ([string]::IsNullOrWhiteSpace($BasePath)) {
     throw "BasePath가 비어 있습니다. -BasePath를 지정하거나 DAILY_NEWS_OUTPUT_DIR 환경변수를 설정하세요."
@@ -33,7 +35,7 @@ function Write-RunLog {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
     Write-Host $line
     if ($Path) {
-        Add-Content -Path $Path -Value $line -Encoding UTF8
+        [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, $script:Utf8NoBom)
     }
 }
 
@@ -61,7 +63,7 @@ function Get-KoreanPublicHolidays {
     $url = "https://date.nager.at/api/v3/PublicHolidays/$Year/KR"
     try {
         $response = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 20
-        $response | ConvertTo-Json -Depth 5 | Set-Content -Path $cachePath -Encoding UTF8
+        [System.IO.File]::WriteAllText($cachePath, ($response | ConvertTo-Json -Depth 5), $script:Utf8NoBom)
         return $response
     } catch {
         Write-Log "공휴일 API 조회 실패. 주말만 휴무로 간주합니다."
@@ -109,26 +111,24 @@ function Convert-MarkdownToHtmlDocument {
     )
 
     $markdown = Get-Content $MarkdownPath -Raw -Encoding UTF8
-    $body = $null
 
-    if (Get-Command ConvertFrom-Markdown -ErrorAction SilentlyContinue) {
-        $converted = ConvertFrom-Markdown -InputObject $markdown
-        if ($converted.Html) {
-            $body = $converted.Html
-        }
-    }
-
-    if (-not $body) {
-        $escaped = [System.Net.WebUtility]::HtmlEncode($markdown)
-        $escaped = $escaped -replace '(?m)^### (.+)$', '<h3>$1</h3>'
-        $escaped = $escaped -replace '(?m)^## (.+)$', '<h2>$1</h2>'
-        $escaped = $escaped -replace '(?m)^# (.+)$', '<h1>$1</h1>'
-        $escaped = $escaped -replace '(?m)^- (.+)$', '<li>$1</li>'
-        $escaped = $escaped -replace '(<li>.*</li>(\r?\n)?)+', { param($m) "<ul>`n$($m.Value)</ul>`n" }
-        $escaped = $escaped -replace '\[(.+?)\]\((.+?)\)', '<a href="$2">$1</a>'
-        $escaped = $escaped -replace "(`r`n|`n){2,}", "</p><p>"
-        $body = "<p>$escaped</p>"
-    }
+    # The markdown body is built from external news-article titles/links, so it
+    # is untrusted input. ConvertFrom-Markdown (markdig) passes raw inline HTML
+    # through unescaped, which would let a malicious article title execute
+    # script in the generated briefing. Always HTML-encode first and only
+    # re-introduce structural markup (headings/lists/links) via regex on the
+    # already-encoded text, so no raw tag from the source can survive.
+    $escaped = [System.Net.WebUtility]::HtmlEncode($markdown)
+    $escaped = $escaped -replace '(?m)^### (.+)$', '<h3>$1</h3>'
+    $escaped = $escaped -replace '(?m)^## (.+)$', '<h2>$1</h2>'
+    $escaped = $escaped -replace '(?m)^# (.+)$', '<h1>$1</h1>'
+    $escaped = $escaped -replace '(?m)^- (.+)$', '<li>$1</li>'
+    $escaped = $escaped -replace '(<li>.*</li>(\r?\n)?)+', { param($m) "<ul>`n$($m.Value)</ul>`n" }
+    # Only turn [text](url) into a real link when the URL is http(s); anything
+    # else (javascript:, data:, etc.) is left as plain encoded text.
+    $escaped = $escaped -replace '\[(.+?)\]\((https?://[^\s")]+)\)', '<a href="$2" rel="noopener noreferrer">$1</a>'
+    $escaped = $escaped -replace "(`r`n|`n){2,}", "</p><p>"
+    $body = "<p>$escaped</p>"
 
     $generatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $html = @"
@@ -367,7 +367,7 @@ $body
 </html>
 "@
 
-    Set-Content -Path $HtmlPath -Value $html -Encoding UTF8
+    [System.IO.File]::WriteAllText($HtmlPath, $html, $script:Utf8NoBom)
 }
 
 function Get-PreferredGeneratedFile {
@@ -424,7 +424,7 @@ function Repair-MarkdownReport {
     }
 
     $normalized = [regex]::Replace($normalized, '(?m)^(핵심 요약|주요 언론보도|제외 또는 참고)\s*$', '## $1')
-    Set-Content -Path $Path -Value $normalized -Encoding UTF8
+    [System.IO.File]::WriteAllText($Path, $normalized + [Environment]::NewLine, $script:Utf8NoBom)
 }
 
 function Test-IsMarkdownReport {
@@ -618,7 +618,7 @@ Output only the final report body.
 "@
 
 $promptPath = Join-Path $reportDir "prompt.txt"
-Set-Content -Path $promptPath -Value $prompt -Encoding UTF8
+[System.IO.File]::WriteAllText($promptPath, $prompt, $script:Utf8NoBom)
 
 if ($DryRun) {
     Write-Log "DryRun 모드입니다."
@@ -686,10 +686,10 @@ try {
         }
 
         if (Test-Path $stdoutPath) {
-            Get-Content $stdoutPath | Add-Content -Path $logPath
+            [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($stdoutPath, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
         }
         if (Test-Path $stderrPath) {
-            Get-Content $stderrPath | Add-Content -Path $logPath
+            [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($stderrPath, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
         }
 
         $generatedMarkdown = Get-PreferredGeneratedFile -SearchDir $reportDir -Pattern "*_$reportDateStamp.md"
