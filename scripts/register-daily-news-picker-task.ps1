@@ -4,7 +4,7 @@ param(
     [string]$ScriptPath = $(Join-Path $env:USERPROFILE ".codex\skills\daily-news-picker\scripts\run-daily-news-picker.ps1"),
     [string]$BasePath = $(if ($env:DAILY_NEWS_OUTPUT_DIR) { $env:DAILY_NEWS_OUTPUT_DIR } else { Join-Path $env:USERPROFILE "Documents\Codex\DailyNewsPicker" }),
     [string]$WorkingRoot = $env:USERPROFILE,
-    [string]$StartTime = "07:00",
+    [string]$StartTime = "09:00",
     [switch]$DangerouslyBypassApprovalsAndSandbox
 )
 

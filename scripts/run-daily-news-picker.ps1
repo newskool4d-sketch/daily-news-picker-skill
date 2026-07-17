@@ -2,7 +2,7 @@
     [string]$BasePath = $env:DAILY_NEWS_OUTPUT_DIR,
     [string]$WorkingRoot = $env:USERPROFILE,
     [string]$CodexCommand = $(if (Test-Path (Join-Path $env:APPDATA "npm\codex.cmd")) { Join-Path $env:APPDATA "npm\codex.cmd" } else { "codex" }),
-    [string]$Model = "gpt-5.4",
+    [string]$Model = "gpt-5.5",
     [int]$CodexTimeoutSeconds = 1800,
     [int]$MaxAttempts = 2,
     [datetime]$ReportDate = (Get-Date).Date,
@@ -439,7 +439,9 @@ function Test-IsMarkdownReport {
     $hasTitle = $trimmed.StartsWith("# 인천교육청 언론보도 현황") -or ($trimmed -match '^20\d{2}\.\s*\d{1,2}\.\s*\d{1,2}\.')
     $hasMainSection = $content -match '(?m)^(?:##\s*)?주요 언론보도\s*$'
     $hasArticleList = ($content -match '(?m)^■\s+.+\s+-\s+.+$') -or ($content -match '확인된 유의미 기사 없음')
-    return ($hasTitle -and $hasMainSection -and $hasArticleList)
+    $hasExpectedWindowStart = $content -match [regex]::Escape($windowStartDisplay)
+    $hasExpectedWindowEnd = $content -match [regex]::Escape($windowEndDisplay)
+    return ($hasTitle -and $hasMainSection -and $hasArticleList -and $hasExpectedWindowStart -and $hasExpectedWindowEnd)
 }
 
 function Get-GeneratedReportMarkdown {
@@ -552,8 +554,8 @@ function Get-RunFailureSummary {
 $reportDate = $ReportDate.Date
 $reportDateStamp = $reportDate.ToString("yyyyMMdd")
 $reportDateDisplay = $reportDate.ToString("yyyy-MM-dd")
-$windowStart = (Get-PreviousBusinessDay -Date $reportDate).Date.AddHours(7)
-$windowEnd = $reportDate.Date.AddHours(7)
+$windowStart = (Get-PreviousBusinessDay -Date $reportDate).Date.AddHours(9)
+$windowEnd = $reportDate.Date.AddHours(9)
 $windowStartDisplay = $windowStart.ToString("yyyy-MM-dd HH:mm")
 $windowEndDisplay = $windowEnd.ToString("yyyy-MM-dd HH:mm")
 $folderName = "인천교육청 언론보도 현황($reportDateStamp)"
@@ -561,9 +563,9 @@ $reportDir = Join-Path $BasePath $folderName
 $markdownPath = Join-Path $reportDir "인천교육청 언론보도 현황.md"
 $htmlPath = Join-Path $reportDir "인천교육청 언론보도 현황.html"
 $logPath = Join-Path $reportDir "run.log"
-$runStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $codexWorkRoot = Join-Path ([System.IO.Path]::GetTempPath()) "DailyNewsPickerCodexWork"
-$codexWorkDir = Join-Path $codexWorkRoot $runStamp
+# 고정 작업 폴더: 날짜별 폴더는 Codex 신뢰 목록([projects])에 매일 1건씩 쌓여 샌드박스 ACL 갱신을 비대화시킴
+$codexWorkDir = Join-Path $codexWorkRoot "current"
 
 if (-not (Test-Path $BasePath)) {
     New-Item -ItemType Directory -Force -Path $BasePath | Out-Null
@@ -581,6 +583,8 @@ if ((Test-Path $markdownPath) -and (Test-Path $htmlPath) -and -not $Force) {
 
 New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
 New-Item -ItemType Directory -Force -Path $codexWorkDir | Out-Null
+# 고정 폴더 재사용: 이전 실행 산출물이 이번 실행 결과로 오인되지 않도록 제거
+Remove-Item -Path (Join-Path $codexWorkDir "last-message.md") -Force -ErrorAction SilentlyContinue
 
 $prompt = @"
 Use `$daily-news-picker at C:\Users\홍주형\.codex\skills\daily-news-picker\SKILL.md.
@@ -588,11 +592,13 @@ Use `$daily-news-picker at C:\Users\홍주형\.codex\skills\daily-news-picker\SK
 This run is an automated report generation job, not a conversation.
 Collect and rank today's news about 인천교육청 and produce the final report immediately.
 The runner will save your final Markdown to disk. Treat the skill's file-save step as already delegated to the runner.
+This is an existing user-approved scheduled task. The current run is authorized within this narrow scope: read web sources and return the report body without pausing for confirmation.
 
 Apply these rules:
 - Report date: $reportDateDisplay
 - Check window: $windowStartDisplay ~ $windowEndDisplay Asia/Seoul
 - Use this exact check window. Do not reinterpret the report date as the article date or move the window to the following day.
+- Exclude any article published or updated after $windowEndDisplay. The verification memo must repeat exactly $windowStartDisplay through $windowEndDisplay, not the actual collection finish time.
 - Scope: Incheon Metropolitan Office of Education, district offices of education, and affiliated institutions
 - Use original external media article links first; do not use `ice.go.kr` press releases as representative selected article links when an accessible media article exists
 - Treat user-provided/reference outlet links as monitored media sources
@@ -633,9 +639,10 @@ $argList = @(
     "--search",
     "exec",
     "--skip-git-repo-check",
+    "-s", "read-only",
     "-C", $codexWorkDir,
     "-m", $Model,
-    "-o", $markdownPath,
+    "-o", (Join-Path $codexWorkDir "last-message.md"),
     $prompt
 )
 
@@ -692,8 +699,9 @@ try {
             [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($stderrPath, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
         }
 
-        $generatedMarkdown = Get-PreferredGeneratedFile -SearchDir $reportDir -Pattern "*_$reportDateStamp.md"
-        $generatedHtml = Get-PreferredGeneratedFile -SearchDir $reportDir -Pattern "*_$reportDateStamp.html"
+        $lastMessagePath = Join-Path $codexWorkDir "last-message.md"
+        $generatedMarkdown = if (Test-NonEmptyFile -Path $lastMessagePath) { Get-Item -LiteralPath $lastMessagePath } else { $null }
+        $generatedHtml = $null
 
         if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $markdownPath) {
             Copy-Item -Path $generatedMarkdown.FullName -Destination $markdownPath -Force
@@ -728,7 +736,7 @@ try {
             Write-RunLog -Path $logPath -Message ("시도 {0} 실패({1}). 부분 산출물 제거 후 재시도합니다." -f $attempt, $retryReason)
             Remove-IfExists -Path $markdownPath
             Remove-IfExists -Path $htmlPath
-            if ($generatedMarkdown) { Remove-IfExists -Path $generatedMarkdown.FullName }
+            if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $lastMessagePath) { Remove-IfExists -Path $generatedMarkdown.FullName }
             if ($generatedHtml) { Remove-IfExists -Path $generatedHtml.FullName }
             Start-Sleep -Seconds 15
         }
@@ -760,7 +768,7 @@ catch {
 
     Remove-IfExists -Path $markdownPath
     Remove-IfExists -Path $htmlPath
-    if ($generatedMarkdown) {
+    if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $lastMessagePath) {
         Remove-IfExists -Path $generatedMarkdown.FullName
     }
     if ($generatedHtml) {
