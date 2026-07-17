@@ -36,7 +36,8 @@
 8. It converts the validated Markdown into an HTML file.
 9. After SUCCEEDED, it feeds the downstream organizer (`~/.codex/skills/edu-news-organizer/scripts/newsdb.py`)
    non-fatally: briefing md first (so the `--selected` filter works), then the candidate-pool JSON, then same-story
-   grouping for the report date. Output goes to `organizer-ingest.log`; failures are logged but never fail the run.
+   grouping, then a premium HTML digest (`교육뉴스 다이제스트.html`, Incheon Education CI design) saved next to the
+   briefing. Output goes to `organizer-ingest.log`; failures are logged but never fail the run.
 
 ## Safety Notes
 

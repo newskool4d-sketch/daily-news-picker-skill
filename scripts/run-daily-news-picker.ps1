@@ -865,7 +865,10 @@ try {
                 & $PythonCommand $organizerScript ingest --json $collectedJsonPath *>> $ingestLog
             }
             & $PythonCommand $organizerScript group --date $reportDateDisplay *>> $ingestLog
-            Write-RunLog -Path $logPath -Message "하류 인제스트 완료 (edu-news-organizer → organizer-ingest.log)"
+            # 프리미엄 HTML 다이제스트를 보고 폴더에 함께 생성 (브리핑과 나란히)
+            $digestHtmlPath = Join-Path $reportDir "교육뉴스 다이제스트.html"
+            & $PythonCommand $organizerScript digest --date $reportDateDisplay --format html --out $digestHtmlPath *>> $ingestLog
+            Write-RunLog -Path $logPath -Message "하류 인제스트·다이제스트 완료 (edu-news-organizer → organizer-ingest.log, 교육뉴스 다이제스트.html)"
         } catch {
             Write-RunLog -Path $logPath -Message ("하류 인제스트 실패(비치명): {0}" -f $_.Exception.Message)
         }
