@@ -869,6 +869,15 @@ try {
             $digestHtmlPath = Join-Path $reportDir "교육뉴스 다이제스트.html"
             & $PythonCommand $organizerScript digest --date $reportDateDisplay --format html --out $digestHtmlPath *>> $ingestLog
             Write-RunLog -Path $logPath -Message "하류 인제스트·다이제스트 완료 (edu-news-organizer → organizer-ingest.log, 교육뉴스 다이제스트.html)"
+
+            # 정적 사이트 배포(A안): EDU_NEWS_SITE_DIR가 설정된 경우에만 공개 안전본을 굽고 git push
+            # (개인 데이터 제외·비공식 표기 — publish_site.py가 --public 렌더). 미설정 시 조용히 생략.
+            if ($env:EDU_NEWS_SITE_DIR) {
+                $publishScript = Join-Path $env:USERPROFILE ".codex\skills\edu-news-organizer\scripts\publish_site.py"
+                $pushFlag = if ($env:EDU_NEWS_SITE_PUSH -eq "1") { "--push" } else { "" }
+                & $PythonCommand $publishScript --site-dir $env:EDU_NEWS_SITE_DIR --date $reportDateDisplay $pushFlag *>> $ingestLog
+                Write-RunLog -Path $logPath -Message ("정적 사이트 배포 완료 (공개 안전본 → {0}, push={1})" -f $env:EDU_NEWS_SITE_DIR, ($env:EDU_NEWS_SITE_PUSH -eq "1"))
+            }
         } catch {
             Write-RunLog -Path $logPath -Message ("하류 인제스트 실패(비치명): {0}" -f $_.Exception.Message)
         }
