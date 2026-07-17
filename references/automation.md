@@ -13,6 +13,8 @@
 
 - Runner: `scripts/run-daily-news-picker.ps1`
 - Task registration: `scripts/register-daily-news-picker-task.ps1`
+- RSS collector: `scripts/collect_news_rss.py` — Google News RSS 주 엔진 + 네이버 뉴스 API 보강의 결정론적 1차 수집기 (2026-07-17 실측 채택).
+  러너가 Codex 실행 전에 자동 호출하며, 수동 단독 실행도 가능 (`--start/--end/--out-dir`).
 
 ## Execution Model
 
@@ -20,9 +22,13 @@
 2. It queries Korean public holidays from `date.nager.at` and caches the result locally.
 3. If it is a weekend or public holiday, it skips generation unless forced.
 4. It creates the dated output folder and writes `run.log` with explicit `STARTED`, `SUCCEEDED`, or `FAILED` status lines.
-5. It runs `codex exec --search` with the `daily-news-picker` instructions.
-6. If Codex fails or writes an empty report, the runner removes partial `md/html` outputs and records a categorized failure summary.
-7. It converts the validated Markdown into an HTML file.
+5. It runs the RSS collector (`collect_news_rss.py`) for the exact check window and drops `collected_articles.json`
+   into the Codex work directory. On collector failure, timeout, or a 0-article result it falls back to Codex self-search.
+6. It runs `codex exec --search` with the `daily-news-picker` instructions; when the candidate pool exists, the prompt
+   directs Codex to use it as the primary pool (with an explicit relevance check for `engine: naver-api` entries)
+   and to spend effort on selection, verification, and gap-filling instead of raw collection.
+7. If Codex fails or writes an empty report, the runner removes partial `md/html` outputs and records a categorized failure summary.
+8. It converts the validated Markdown into an HTML file.
 
 ## Safety Notes
 

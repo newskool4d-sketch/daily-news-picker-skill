@@ -3,6 +3,8 @@
     [string]$WorkingRoot = $env:USERPROFILE,
     [string]$CodexCommand = $(if (Test-Path (Join-Path $env:APPDATA "npm\codex.cmd")) { Join-Path $env:APPDATA "npm\codex.cmd" } else { "codex" }),
     [string]$Model = "gpt-5.5",
+    [string]$PythonCommand = "python",
+    [int]$CollectorTimeoutSeconds = 600,
     [int]$CodexTimeoutSeconds = 1800,
     [int]$MaxAttempts = 2,
     [datetime]$ReportDate = (Get-Date).Date,
@@ -585,6 +587,7 @@ New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
 New-Item -ItemType Directory -Force -Path $codexWorkDir | Out-Null
 # 고정 폴더 재사용: 이전 실행 산출물이 이번 실행 결과로 오인되지 않도록 제거
 Remove-Item -Path (Join-Path $codexWorkDir "last-message.md") -Force -ErrorAction SilentlyContinue
+Remove-Item -Path (Join-Path $codexWorkDir "collected_articles.json") -Force -ErrorAction SilentlyContinue
 
 $prompt = @"
 Use `$daily-news-picker at C:\Users\홍주형\.codex\skills\daily-news-picker\SKILL.md.
@@ -632,7 +635,75 @@ if ($DryRun) {
     Write-Log "Markdown: $markdownPath"
     Write-Log "HTML: $htmlPath"
     Write-Log "Prompt: $promptPath"
+    Write-Log "1차 수집기: $(Join-Path $PSScriptRoot 'collect_news_rss.py') (DryRun에서는 실행하지 않음)"
     exit 0
+}
+
+# ---- 1차 수집: Google News RSS(+네이버 API 보강) 수집기 ----
+# 성공 시 후보 풀 JSON을 Codex 작업 폴더에 두고 프롬프트로 안내한다.
+# 실패·시간초과·0건이면 기존 방식(Codex 자체 검색)으로 폴백한다.
+$collectedJsonPath = Join-Path $codexWorkDir "collected_articles.json"
+$collectorPath = Join-Path $PSScriptRoot "collect_news_rss.py"
+$collectorUsed = $false
+$collectorCount = 0
+if (Test-Path $collectorPath) {
+    Write-RunLog -Path $logPath -Message "1차 수집기 실행: Google News RSS(+네이버 보강)"
+    $collectorStdout = Join-Path $reportDir "collector.stdout.log"
+    $collectorStderr = Join-Path $reportDir "collector.stderr.log"
+    $prevPyEnc = $env:PYTHONIOENCODING
+    $env:PYTHONIOENCODING = "utf-8"
+    try {
+        $collectorArgs = @($collectorPath, "--start", $windowStartDisplay, "--end", $windowEndDisplay, "--out-dir", $codexWorkDir)
+        $quotedCollectorArgs = $collectorArgs | ForEach-Object {
+            if ($_ -match '\s|"') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+        }
+        $collectorProcess = Start-Process -FilePath $PythonCommand -ArgumentList ([string]::Join(' ', $quotedCollectorArgs)) -RedirectStandardOutput $collectorStdout -RedirectStandardError $collectorStderr -PassThru -NoNewWindow
+        if (-not $collectorProcess.WaitForExit($CollectorTimeoutSeconds * 1000)) {
+            try { $collectorProcess.Kill($true) } catch { Stop-Process -Id $collectorProcess.Id -Force -ErrorAction SilentlyContinue }
+            Write-RunLog -Path $logPath -Message "수집기 시간 초과 — Codex 자체 검색으로 폴백합니다."
+        } elseif ($collectorProcess.ExitCode -ne 0) {
+            Write-RunLog -Path $logPath -Message ("수집기 실패(exit {0}) — Codex 자체 검색으로 폴백합니다." -f $collectorProcess.ExitCode)
+        } elseif (Test-NonEmptyFile -Path $collectedJsonPath) {
+            $pool = Get-Content -Path $collectedJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($pool.article_count -ge 1) {
+                $collectorUsed = $true
+                $collectorCount = $pool.article_count
+                Write-RunLog -Path $logPath -Message ("1차 수집 완료: {0}건 (수집 실패 쿼리 {1}건)" -f $pool.article_count, @($pool.failures).Count)
+            } else {
+                Write-RunLog -Path $logPath -Message "1차 수집 0건 — Codex 자체 검색으로 폴백합니다."
+            }
+        } else {
+            Write-RunLog -Path $logPath -Message "수집 결과 파일이 없습니다 — Codex 자체 검색으로 폴백합니다."
+        }
+    } catch {
+        Write-RunLog -Path $logPath -Message ("수집기 실행 오류: {0} — Codex 자체 검색으로 폴백합니다." -f $_.Exception.Message)
+    } finally {
+        $env:PYTHONIOENCODING = $prevPyEnc
+        foreach ($tempLog in @($collectorStdout, $collectorStderr)) {
+            if (Test-Path $tempLog) {
+                [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($tempLog, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
+                Remove-Item -Path $tempLog -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+} else {
+    Write-RunLog -Path $logPath -Message "수집기 스크립트가 없습니다 — Codex 자체 검색으로 진행합니다."
+}
+
+if (-not $collectorUsed) {
+    Remove-Item -Path $collectedJsonPath -Force -ErrorAction SilentlyContinue
+} else {
+    $prompt += @"
+
+Pre-collected candidate pool: your working directory contains ``collected_articles.json`` with $collectorCount candidate articles,
+produced by the skill's deterministic collector (Google News RSS primary + Naver API supplement) for exactly the check window above,
+with original media URLs already resolved.
+- Use it as the primary candidate pool. Do not redo broad first-pass collection from scratch.
+- Verify the relevance of every entry before including it. Entries with ``"engine": "naver-api"`` are unfiltered keyword matches and require an explicit relevance check.
+- Check the ``failures`` field: queries listed there may be under-collected, so supplement those specific queries with targeted searches per the skill's recipes.
+- Still apply the skill's selection, deduplication, ranking, verification, and output rules to the pool.
+"@
+    [System.IO.File]::WriteAllText($promptPath, $prompt, $script:Utf8NoBom)
 }
 
 $argList = @(

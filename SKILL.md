@@ -49,8 +49,16 @@ Use the deep-research pattern in a faster news-monitoring form:
    If the user gives no separate 기간 조건, use the current business day 9:00 AM check window.
    If the user says `오늘`, `어제`, `이번 주`, or `최근`, restate it with exact dates.
    If the request date is a weekend or public holiday, say that the default briefing is skipped unless the user explicitly requests a manual run.
-2. Search recent coverage with external press article links first.
-   Start with institution-name queries in news search, then run the monitored-outlet source-seed checks from [references/media-sources.md](./references/media-sources.md).
+2. Collect candidate articles, preferring the deterministic RSS collector.
+   If shell execution is available, run [scripts/collect_news_rss.py](./scripts/collect_news_rss.py) first:
+   it fetches the full Q1~Q5 query set from Google News RSS, filters to the check window (KST),
+   de-duplicates, and resolves original media URLs into `collected_articles.json` (실측 2026-07-17: 107건 수집, 원문 URL 복원 107/107).
+   Queries that hit the 100-item cap or fail are automatically supplemented from the Naver News API when
+   `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET` env vars exist; treat `engine: naver-api` entries as unfiltered
+   candidates that need an explicit relevance check during selection (실측: 보강 33건 중 절반가량이 본문 매칭 노이즈).
+   Use that JSON as the candidate pool and spend browsing effort on selection, verification, and follow-up instead of raw collection.
+   If shell execution is not available, search recent coverage with external press article links first:
+   start with institution-name queries in news search, then run the monitored-outlet source-seed checks from [references/media-sources.md](./references/media-sources.md).
    Always run the Q5 directly-affiliated-institution and library loop from [references/search-recipes.md](./references/search-recipes.md) every business day, not only on low-count days: 직속기관·도서관 are frequently reported under their own names only and are missed by 본청/지원청 keywords.
    Also run the `인천교육감` query (Q4) for 교육감 동정·인사·외부 직위 coverage that 본청 keywords can miss.
    Use official institution pages only to verify facts, institution names, dates, and background, not as the default selected article link.
