@@ -850,6 +850,26 @@ try {
 
     Write-RunLog -Path $logPath -Message "STATUS: SUCCEEDED"
     Write-RunLog -Path $logPath -Message "생성 완료: $reportDir"
+
+    # ---- 하류 자동 인제스트 (edu-news-organizer) — 실패해도 브리핑 성공에는 영향 없음 ----
+    $organizerScript = Join-Path $env:USERPROFILE ".codex\skills\edu-news-organizer\scripts\newsdb.py"
+    if (Test-Path $organizerScript) {
+        $ingestLog = Join-Path $reportDir "organizer-ingest.log"
+        Remove-IfExists -Path $ingestLog
+        try {
+            $env:PYTHONIOENCODING = "utf-8"
+            # 순서 중요: 선별본(briefing)을 먼저 넣어야 브리핑 기사가 briefing-md 배치로 저장되어
+            # 하류의 --selected(선별 기사) 필터가 작동한다. 후보 풀(json)은 그 뒤에.
+            & $PythonCommand $organizerScript ingest --briefing $markdownPath *>> $ingestLog
+            if (Test-NonEmptyFile -Path $collectedJsonPath) {
+                & $PythonCommand $organizerScript ingest --json $collectedJsonPath *>> $ingestLog
+            }
+            & $PythonCommand $organizerScript group --date $reportDateDisplay *>> $ingestLog
+            Write-RunLog -Path $logPath -Message "하류 인제스트 완료 (edu-news-organizer → organizer-ingest.log)"
+        } catch {
+            Write-RunLog -Path $logPath -Message ("하류 인제스트 실패(비치명): {0}" -f $_.Exception.Message)
+        }
+    }
 }
 catch {
     $exitCode = if ($timedOut) { 124 } elseif ($process) { $process.ExitCode } else { -1 }

@@ -34,6 +34,9 @@
    in every run during 2026-07-14~17 and caused three consecutive daily failures once the read-only sandbox landed.
 7. If Codex fails or writes an empty report, the runner removes partial `md/html` outputs and records a categorized failure summary.
 8. It converts the validated Markdown into an HTML file.
+9. After SUCCEEDED, it feeds the downstream organizer (`~/.codex/skills/edu-news-organizer/scripts/newsdb.py`)
+   non-fatally: briefing md first (so the `--selected` filter works), then the candidate-pool JSON, then same-story
+   grouping for the report date. Output goes to `organizer-ingest.log`; failures are logged but never fail the run.
 
 ## Safety Notes
 
