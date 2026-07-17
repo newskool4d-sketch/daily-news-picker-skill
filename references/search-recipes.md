@@ -15,8 +15,12 @@
 Q1~Q5 전체 검색어 세트를 RSS로 수집·창 필터링·중복 제거·원문 URL 복원까지 수행해 `collected_articles.json`을 만든다.
 
 ```text
-https://news.google.com/rss/search?q={검색어}+when:{N}d&hl=ko&gl=KR&ceid=KR:ko
+https://news.google.com/rss/search?q={검색어}+after:{YYYY-MM-DD}+before:{YYYY-MM-DD}&hl=ko&gl=KR&ceid=KR:ko
 ```
+
+날짜 연산자 실측(2026-07-17): Google News는 `after:/before:`를 **미국 태평양시(PT) 기준**으로 해석한다.
+스크립트가 KST 점검 창을 PT 날짜로 변환해 정밀 범위를 만든다. `when:Nd` 방식은 100건 상한이
+최신 기사로 채워져 과거 창 기사가 밀려나므로 사용하지 않는다 (백필 실측: when 방식 창 내 6건 vs 정밀 범위 31건).
 
 실측 기록 (2026-07-17):
 
@@ -35,6 +39,7 @@ https://news.google.com/rss/search?q={검색어}+when:{N}d&hl=ko&gl=KR&ceid=KR:k
 
 - 전제: 사용자 환경변수 `NAVER_CLIENT_ID` / `NAVER_CLIENT_SECRET` (developers.naver.com 검색 API 앱, 키 값 로그·채팅 노출 금지)
 - 스크립트가 100건 상한 도달·수집 실패 쿼리에 한해 자동 호출. 키가 없으면 조용히 생략하고 안내만 출력
+- 최신순 페이지네이션(start 최대 1000)으로 창 시작 이전 기사가 나올 때까지 수집 — 과거 창 백필에도 유효
 - 장점: `originallink`가 언론사 원문 URL이라 복원 불필요, `pubDate`가 KST
 - **한계 (주 엔진으로 쓰지 않는 이유)**: 형태소 분리 매칭이라 정밀도가 낮다 — `인천 학생교육원` 쿼리에 인천대 영재교육원·무관한 금융 기사까지 혼입되는 것을 실측 확인
 - 실측(2026-07-17): 상한 걸린 Q1·Q4 보강에서 신규 33건 추가 확보 (교육감협의회·직업계고 개편·조식 지원 협약 등 실제 누락분 포함). 단 본문 매칭 노이즈(칼럼·입찰정보 등)가 섞이므로 **`engine: naver-api` 항목은 선별 단계에서 관련성 확인 필수**

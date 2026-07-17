@@ -53,8 +53,16 @@ function Get-HolidayCachePath {
 function Get-KoreanPublicHolidays {
     param([int]$Year)
 
+    # 캐시 TTL 7일: 법 개정으로 공휴일이 바뀔 수 있다 (실사례: 2026-05-11 시행 개정으로
+    # 제헌절 공휴일 재지정 — 무기한 캐시 탓에 2026-07-17 공휴일 실행 사고 발생)
     $cachePath = Get-HolidayCachePath -Year $Year
+    $cacheFresh = $false
     if (Test-Path $cachePath) {
+        $cacheAgeDays = ((Get-Date) - (Get-Item $cachePath).LastWriteTime).TotalDays
+        $cacheFresh = ($cacheAgeDays -lt 7)
+    }
+
+    if ($cacheFresh) {
         try {
             return (Get-Content $cachePath -Raw | ConvertFrom-Json)
         } catch {
@@ -68,6 +76,14 @@ function Get-KoreanPublicHolidays {
         [System.IO.File]::WriteAllText($cachePath, ($response | ConvertTo-Json -Depth 5), $script:Utf8NoBom)
         return $response
     } catch {
+        if (Test-Path $cachePath) {
+            Write-Log "공휴일 API 조회 실패. 만료된 캐시로 대체합니다."
+            try {
+                return (Get-Content $cachePath -Raw | ConvertFrom-Json)
+            } catch {
+                Write-Log "만료 캐시 파싱도 실패했습니다."
+            }
+        }
         Write-Log "공휴일 API 조회 실패. 주말만 휴무로 간주합니다."
         return @()
     }
@@ -706,6 +722,9 @@ with original media URLs already resolved.
     [System.IO.File]::WriteAllText($promptPath, $prompt, $script:Utf8NoBom)
 }
 
+# 프롬프트는 argv가 아니라 stdin으로 전달한다 ("-" = stdin 읽기).
+# argv 전달 시 npm .cmd 셔틀(cmd.exe)이 개행에서 프롬프트를 끊어 첫 줄만 도달하는
+# 사고가 있었다 (2026-07-14~17 실측: 4개 실행 모두 'Apply these rules' 미전달 확인).
 $argList = @(
     "--search",
     "exec",
@@ -714,7 +733,7 @@ $argList = @(
     "-C", $codexWorkDir,
     "-m", $Model,
     "-o", (Join-Path $codexWorkDir "last-message.md"),
-    $prompt
+    "-"
 )
 
 $stdoutPath = Join-Path $reportDir "codex.stdout.log"
@@ -752,7 +771,7 @@ try {
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         Write-RunLog -Path $logPath -Message ("Codex 실행을 시작합니다. (시도 {0}/{1})" -f $attempt, $MaxAttempts)
         $timedOut = $false
-        $process = Start-Process -FilePath $CodexCommand -ArgumentList $argumentString -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -NoNewWindow
+        $process = Start-Process -FilePath $CodexCommand -ArgumentList $argumentString -RedirectStandardInput $promptPath -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -NoNewWindow
         if (-not $process.WaitForExit($CodexTimeoutSeconds * 1000)) {
             $timedOut = $true
             try {

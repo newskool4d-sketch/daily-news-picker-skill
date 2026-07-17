@@ -19,7 +19,9 @@
 ## Execution Model
 
 1. The runner checks whether the current date is a weekday.
-2. It queries Korean public holidays from `date.nager.at` and caches the result locally.
+2. It queries Korean public holidays from `date.nager.at` and caches the result locally with a **7-day TTL**
+   (법 개정으로 공휴일이 바뀔 수 있음 — 실사례: 2026-05-11 시행 개정으로 제헌절 재지정, 무기한 캐시 탓에
+   2026-07-17 공휴일에 러너가 실행되는 사고 발생). On API failure it falls back to the stale cache.
 3. If it is a weekend or public holiday, it skips generation unless forced.
 4. It creates the dated output folder and writes `run.log` with explicit `STARTED`, `SUCCEEDED`, or `FAILED` status lines.
 5. It runs the RSS collector (`collect_news_rss.py`) for the exact check window and drops `collected_articles.json`
@@ -27,6 +29,9 @@
 6. It runs `codex exec --search` with the `daily-news-picker` instructions; when the candidate pool exists, the prompt
    directs Codex to use it as the primary pool (with an explicit relevance check for `engine: naver-api` entries)
    and to spend effort on selection, verification, and gap-filling instead of raw collection.
+   The prompt is delivered via **stdin** (`codex exec -` + `-RedirectStandardInput prompt.txt`), never as an argv string:
+   the npm `.cmd` shim truncates argv at the first newline, which silently delivered only the prompt's first line
+   in every run during 2026-07-14~17 and caused three consecutive daily failures once the read-only sandbox landed.
 7. If Codex fails or writes an empty report, the runner removes partial `md/html` outputs and records a categorized failure summary.
 8. It converts the validated Markdown into an HTML file.
 

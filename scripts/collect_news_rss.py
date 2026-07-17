@@ -122,10 +122,18 @@ def in_window(published_kst: datetime, start: datetime, end: datetime) -> bool:
     return start <= published_kst < end
 
 
-def when_operator(start: datetime, now: datetime) -> str:
-    """창 시작을 여유 있게 덮는 when:Nd 연산자."""
-    days = max(1, (now - start).days + 2)
-    return f"when:{days}d"
+def gnews_range_operator(start: datetime, end: datetime) -> str:
+    """점검 창을 정밀 타격하는 after:/before: 연산자.
+
+    실측(2026-07-17): Google News는 날짜를 미국 태평양시(PT) 기준으로 해석한다.
+    when:Nd 방식은 100건 상한이 최신 기사로 채워져 과거 창 기사가 밀려나는 문제가 있어
+    (백필 실측: when 방식 창 내 6건 vs 정밀 범위 31건) 창에 맞춘 날짜 범위를 쓴다.
+    경계 오차(PDT/PST ±1h)는 이후 pubDate 정밀 필터가 흡수한다.
+    """
+    pt = timezone(timedelta(hours=-7))
+    after = start.astimezone(pt).date()
+    before = end.astimezone(pt).date() + timedelta(days=1)
+    return f"after:{after:%Y-%m-%d} before:{before:%Y-%m-%d}"
 
 
 # ---------- 네이버 뉴스 API (보강 엔진) ----------
@@ -148,16 +156,36 @@ def naver_keys():
     return (cid.strip() if cid else None), (csec.strip() if csec else None)
 
 
-def fetch_naver(query: str, client_id: str, client_secret: str, display: int = 100):
+def fetch_naver(query: str, client_id: str, client_secret: str, display: int = 100, start: int = 1):
     """네이버 뉴스 검색 API. originallink가 언론사 원문 URL, pubDate는 KST(+0900)."""
     q = urllib.parse.quote(query)
-    url = f"https://openapi.naver.com/v1/search/news.json?query={q}&display={display}&sort=date"
+    url = f"https://openapi.naver.com/v1/search/news.json?query={q}&display={display}&sort=date&start={start}"
     req = urllib.request.Request(url)
     req.add_header("X-Naver-Client-Id", client_id)
     req.add_header("X-Naver-Client-Secret", client_secret)
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return data.get("items", [])
+
+
+def fetch_naver_window(query: str, client_id: str, client_secret: str, window_start: datetime):
+    """최신순 페이지네이션으로 창 시작 이전 기사가 나올 때까지 수집 (start 최대 1000)."""
+    items = []
+    start = 1
+    while start <= 1000:
+        page = fetch_naver(query, client_id, client_secret, display=100, start=start)
+        if not page:
+            break
+        items.extend(page)
+        try:
+            oldest = parsedate_to_datetime(page[-1]["pubDate"]).astimezone(KST)
+            if oldest < window_start:
+                break
+        except Exception:
+            break
+        start += 100
+        time.sleep(0.2)
+    return items
 
 
 # ---------- 수집 ----------
@@ -235,14 +263,13 @@ def resolve_original_url(google_link: str):
 
 
 def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
-    now = datetime.now(KST)
-    when = when_operator(window_start, now)
+    range_op = gnews_range_operator(window_start, window_end)
     seen_ids = {}
     failures = []
 
     for label, query in QUERIES:
         try:
-            items = fetch_rss(query, when)
+            items = fetch_rss(query, range_op)
         except Exception as e:
             failures.append({"query": query, "label": label, "error": str(e)})
             print(f"[수집 실패] {label} '{query}': {e}", file=sys.stderr)
@@ -313,7 +340,7 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
             added = 0
             for label, query in supplement_queries:
                 try:
-                    items = fetch_naver(query, cid, csec)
+                    items = fetch_naver_window(query, cid, csec, window_start)
                 except Exception as e:
                     print(f"[네이버 보강 실패] {label} '{query}': {e}", file=sys.stderr)
                     continue
@@ -372,7 +399,8 @@ def self_test():
     e = datetime(2026, 7, 17, 9, 0, tzinfo=KST)
     assert in_window(datetime(2026, 7, 16, 9, 0, tzinfo=KST), s, e)
     assert not in_window(datetime(2026, 7, 17, 9, 0, tzinfo=KST), s, e)
-    assert when_operator(s, datetime(2026, 7, 17, 8, 0, tzinfo=KST)) == "when:2d"
+    # 7/16 09:00 KST = 7/15 17:00 PT → after:07-15 / 7/17 09:00 KST = 7/16 17:00 PT → before:07-17
+    assert gnews_range_operator(s, e) == "after:2026-07-15 before:2026-07-17"
     print("self-test OK")
 
 
