@@ -18,7 +18,7 @@ This skill should be treated as a default daily monitoring skill, not only an ex
 
 Default operating rule:
 
-- 기준 시각: 평일 오전 9시
+- 기준 시각: 평일 오전 5시
 - 기준 범위: 직전 업무일 점검 이후 누적된 언론보도 현황
 - 제외일: 토요일, 일요일, 공휴일. 제외일 기사는 다음 평일 점검 창에 포함
 - 별도 지시가 없으면 위 기준을 적용
@@ -46,7 +46,7 @@ Always browse because news freshness matters.
 Use the deep-research pattern in a faster news-monitoring form:
 
 1. Confirm the time window from the user request.
-   If the user gives no separate 기간 조건, use the current business day 9:00 AM check window.
+   If the user gives no separate 기간 조건, use the current business day 5:00 AM collection window.
    If the user says `오늘`, `어제`, `이번 주`, or `최근`, restate it with exact dates.
    If the request date is a weekend or public holiday, say that the default briefing is skipped unless the user explicitly requests a manual run.
 2. Collect candidate articles, preferring the deterministic RSS collector.

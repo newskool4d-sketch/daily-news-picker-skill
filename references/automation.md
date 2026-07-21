@@ -47,8 +47,8 @@
 
 ## Scheduler
 
-Use Windows Task Scheduler to call the runner every weekday at 9:00 AM.
-Weekend and public holiday suppression is handled inside the runner script; skipped-day articles are included in the next business-day 9:00 AM check window.
+Use Windows Task Scheduler to call the runner every day at 5:00 AM; the runner skips weekends and Korean public holidays.
+Weekend and public holiday suppression is handled inside the runner script; skipped-day articles are included in the next business-day 5:00 AM collection window.
 Register the task with PowerShell 7 (`pwsh`) when available. Windows PowerShell 5 may misread UTF-8 Korean strings in this script and fail before execution.
 
 Example registration command:

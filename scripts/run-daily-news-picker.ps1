@@ -4,6 +4,7 @@
     [string]$CodexCommand = $(if (Test-Path (Join-Path $env:APPDATA "npm\codex.cmd")) { Join-Path $env:APPDATA "npm\codex.cmd" } else { "codex" }),
     [string]$Model = "gpt-5.5",
     [string]$PythonCommand = "python",
+    [timespan]$CollectionTime = ([timespan]"05:00"),
     [int]$CollectorTimeoutSeconds = 600,
     [int]$CodexTimeoutSeconds = 1800,
     [int]$MaxAttempts = 2,
@@ -20,6 +21,10 @@ $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 if ([string]::IsNullOrWhiteSpace($BasePath)) {
     throw "BasePath가 비어 있습니다. -BasePath를 지정하거나 DAILY_NEWS_OUTPUT_DIR 환경변수를 설정하세요."
+}
+
+if ($CollectionTime -lt [timespan]::Zero -or $CollectionTime -ge [timespan]::FromDays(1)) {
+    throw "CollectionTime은 00:00 이상 24:00 미만이어야 합니다: $CollectionTime"
 }
 
 function Write-Log {
@@ -572,8 +577,8 @@ function Get-RunFailureSummary {
 $reportDate = $ReportDate.Date
 $reportDateStamp = $reportDate.ToString("yyyyMMdd")
 $reportDateDisplay = $reportDate.ToString("yyyy-MM-dd")
-$windowStart = (Get-PreviousBusinessDay -Date $reportDate).Date.AddHours(9)
-$windowEnd = $reportDate.Date.AddHours(9)
+$windowStart = (Get-PreviousBusinessDay -Date $reportDate).Date.Add($CollectionTime)
+$windowEnd = $reportDate.Date.Add($CollectionTime)
 $windowStartDisplay = $windowStart.ToString("yyyy-MM-dd HH:mm")
 $windowEndDisplay = $windowEnd.ToString("yyyy-MM-dd HH:mm")
 $folderName = "인천교육청 언론보도 현황($reportDateStamp)"

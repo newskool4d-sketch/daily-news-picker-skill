@@ -11,9 +11,9 @@
 선별·랭킹·요약은 기존 스킬 프롬프트(에이전트)가 수행한다.
 
 사용:
-    python collect_news_rss.py                       # 오늘 기준 창 (직전 업무일 09:00 ~ 오늘 09:00 KST)
+    python collect_news_rss.py                       # 오늘 기준 창 (직전 업무일 05:00 ~ 오늘 05:00 KST)
     python collect_news_rss.py --date 2026-07-17     # 보고일 지정
-    python collect_news_rss.py --start "2026-07-16 09:00" --end "2026-07-17 09:00"
+    python collect_news_rss.py --start "2026-07-16 05:00" --end "2026-07-17 05:00"
     python collect_news_rss.py --out-dir <폴더>       # 기본: 현재 폴더
     python collect_news_rss.py --no-resolve          # 원문 URL 복원 생략(빠른 확인용)
     python collect_news_rss.py --self-test           # 순수 함수 자체 테스트
@@ -395,11 +395,11 @@ def self_test():
     # 2026-07-13은 월요일 → 직전 업무일은 금요일 7/10
     assert previous_business_day(datetime(2026, 7, 13)) == datetime(2026, 7, 10)
     assert previous_business_day(datetime(2026, 7, 17)) == datetime(2026, 7, 16)
-    s = datetime(2026, 7, 16, 9, 0, tzinfo=KST)
-    e = datetime(2026, 7, 17, 9, 0, tzinfo=KST)
-    assert in_window(datetime(2026, 7, 16, 9, 0, tzinfo=KST), s, e)
-    assert not in_window(datetime(2026, 7, 17, 9, 0, tzinfo=KST), s, e)
-    # 7/16 09:00 KST = 7/15 17:00 PT → after:07-15 / 7/17 09:00 KST = 7/16 17:00 PT → before:07-17
+    s = datetime(2026, 7, 16, 5, 0, tzinfo=KST)
+    e = datetime(2026, 7, 17, 5, 0, tzinfo=KST)
+    assert in_window(datetime(2026, 7, 16, 5, 0, tzinfo=KST), s, e)
+    assert not in_window(datetime(2026, 7, 17, 5, 0, tzinfo=KST), s, e)
+    # 7/16 05:00 KST = 7/15 13:00 PT → after:07-15 / 7/17 05:00 KST = 7/16 13:00 PT → before:07-17
     assert gnews_range_operator(s, e) == "after:2026-07-15 before:2026-07-17"
     print("self-test OK")
 
@@ -424,8 +424,8 @@ def main():
     else:
         report_date = datetime.strptime(args.date, "%Y-%m-%d") if args.date else datetime.now(KST).replace(tzinfo=None)
         report_date = report_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        window_start = previous_business_day(report_date).replace(hour=9, tzinfo=KST)
-        window_end = report_date.replace(hour=9, tzinfo=KST)
+        window_start = previous_business_day(report_date).replace(hour=5, tzinfo=KST)
+        window_end = report_date.replace(hour=5, tzinfo=KST)
 
     print(f"점검 창: {window_start:%Y-%m-%d %H:%M} ~ {window_end:%Y-%m-%d %H:%M} KST\n")
     articles, failures = collect(window_start, window_end, resolve=not args.no_resolve)
