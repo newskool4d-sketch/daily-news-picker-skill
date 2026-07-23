@@ -34,9 +34,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 KST = timezone(timedelta(hours=9))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-# 검색어 세트 — references/search-recipes.md 의 Q1~Q5와 동기 유지할 것.
+# 검색어 세트 — references/search-recipes.md 의 Q1~Q7과 동기 유지할 것.
 # 직속기관 목록 정본: references/institution-scope.md
-QUERIES = [
+CORE_QUERIES = [
     ("Q1", "인천교육청"),
     ("Q2", "인천교육지원청"),
     ("Q3", "인천 학생교육원"),
@@ -59,6 +59,52 @@ QUERIES = [
     ("Q5", "인천교육청 서구도서관"),
     ("Q5", "인천교육청 신트리도서관"),
 ]
+
+# 2026-07-01 기준 인천광역시 2군·9구. 공식 정본:
+# https://www.incheon.go.kr/IC040102
+INCHEON_ADMIN_AREAS = (
+    "강화군", "옹진군", "제물포구", "영종구", "미추홀구", "연수구",
+    "남동구", "부평구", "계양구", "서해구", "검단구",
+)
+
+# 제목에서 인천 학교·학생 귀속을 추정할 때 쓰는 대표 생활권·동 명칭.
+# 지역명 단독으로는 관련 기사로 확정하지 않고 교육 주체와 함께 있을 때만 긍정 신호로 쓴다.
+INCHEON_LOCALITIES = (
+    "송도", "청라", "영종", "검단", "구월", "논현", "석남", "검암",
+    "가정", "주안", "부개", "계산", "운서", "신현", "가좌", "만수",
+)
+
+# 군·구 학교/학생 기사와 대표 생활권 단독 보도를 회수한다. 다중 OR 쿼리는 검색어 잘림 때문에 금지.
+AREA_QUERIES = [
+    ("Q6", "인천 학교"),
+    ("Q6", "인천 학생"),
+] + [
+    ("Q6", f"{area} {subject}")
+    for area in INCHEON_ADMIN_AREAS
+    for subject in ("학교", "학생")
+]
+LOCALITY_QUERIES = [
+    ("Q7", f"{area} {subject}")
+    for area in ("송도", "청라")
+    for subject in ("학교", "학생")
+]
+QUERIES = CORE_QUERIES + AREA_QUERIES + LOCALITY_QUERIES
+
+INCHEON_OFFICE_MARKERS = (
+    "인천광역시교육청", "인천시교육청", "인천교육청", "인천교육감", "도성훈",
+)
+EDUCATION_SUBJECT_MARKERS = (
+    "교육지원청", "교육위원회", "학교", "초등학교", "중학교", "고등학교", "특수학교",
+    "유치원", "학생", "초등생", "중학생", "고등학생", "고교생", "학부모", "교사", "교원",
+    "보건교사", "교육원", "평생학습관", "도서관", "학교지원단",
+)
+STUDENT_STORY_MARKERS = (
+    "대회", "경진대회", "공모전", "수상", "우승", "입상", "대상", "표창",
+    "장학금", "선행", "미담", "봉사", "기부", "구조", "발명",
+)
+NON_EDUCATION_BUSINESS_MARKERS = (
+    "쿠팡", "물류센터", "판매자", "로켓그로스", "재고 손실", "전액 보상",
+)
 
 # 배제 도메인 — 2026-07-17 실측에서 관찰된 비대상·재게재 소스
 EXCLUDED_DOMAINS = {
@@ -120,6 +166,56 @@ def previous_business_day(date):
 
 def in_window(published_kst: datetime, start: datetime, end: datetime) -> bool:
     return start <= published_kst < end
+
+
+def classify_title_relevance(title: str) -> dict:
+    """제목만으로 관련성의 1차 힌트를 만든다.
+
+    이 값은 본문 검증을 대체하지 않는다. 특히 정확한 인천 학교명이 지역명 없이 등장하는
+    기사는 ``needs_review``로 남겨 후속 학교현황 조회와 본문 확인 기회를 보존한다.
+    """
+    compact = re.sub(r"\s+", " ", title).strip()
+    office_hits = [marker for marker in INCHEON_OFFICE_MARKERS if marker in compact]
+    location_hits = ["인천"] if "인천" in compact else []
+    location_hits.extend(marker for marker in INCHEON_ADMIN_AREAS if marker in compact)
+    location_hits.extend(marker for marker in INCHEON_LOCALITIES if marker in compact)
+    location_hits = list(dict.fromkeys(location_hits))
+    subject_hits = [marker for marker in EDUCATION_SUBJECT_MARKERS if marker in compact]
+    story_hits = [marker for marker in STUDENT_STORY_MARKERS if marker in compact]
+    negative_hits = [marker for marker in NON_EDUCATION_BUSINESS_MARKERS if marker in compact]
+
+    reasons = []
+    if office_hits:
+        reasons.append("incheon_education_office")
+    if location_hits:
+        reasons.append("incheon_location")
+    if subject_hits:
+        reasons.append("education_subject")
+    if story_hits:
+        reasons.append("student_achievement_or_good_deed")
+
+    if office_hits or (location_hits and subject_hits):
+        status = "likely_relevant"
+    elif not subject_hits and (location_hits or negative_hits):
+        status = "likely_irrelevant"
+        if location_hits:
+            reasons.append("location_without_education_subject")
+        if negative_hits:
+            reasons.append("commercial_context_without_education_subject")
+    else:
+        # 학교명·학생 미담이 지역명 없이 보도되는 사례를 제목만으로 버리지 않는다.
+        status = "needs_review"
+        if not reasons:
+            reasons.append("no_title_evidence")
+
+    return {
+        "status": status,
+        "reasons": reasons,
+        "location_hits": location_hits,
+        "subject_hits": subject_hits,
+        "story_hits": story_hits,
+        "negative_hits": negative_hits,
+    }
 
 
 def gnews_range_operator(start: datetime, end: datetime) -> str:
@@ -291,8 +387,10 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
             if gid in seen_ids:
                 seen_ids[gid]["queries"].append(f"{label}:{query}")
                 continue
+            title = strip_source_suffix(it["title"], it["source_name"])
+            relevance = classify_title_relevance(title)
             seen_ids[gid] = {
-                "title": strip_source_suffix(it["title"], it["source_name"]),
+                "title": title,
                 "publisher": it["source_name"],
                 "publisher_domain": source_domain,
                 "google_url": it["link"],
@@ -301,6 +399,12 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
                 "published_at_kst": pub.strftime("%Y-%m-%d %H:%M"),
                 "queries": [f"{label}:{query}"],
                 "engine": "google-news-rss",
+                "relevance_hint": relevance["status"],
+                "relevance_reasons": relevance["reasons"],
+                "location_hits": relevance["location_hits"],
+                "education_subject_hits": relevance["subject_hits"],
+                "student_story_hits": relevance["story_hits"],
+                "negative_context_hits": relevance["negative_hits"],
             }
             kept += 1
         cap_note = " (⚠️ 100건 상한 도달 — 창 초반 기사 누락 가능)" if capped else ""
@@ -362,6 +466,7 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
                         continue
                     known_urls.add(original)
                     known_titles.add(title_key(title))
+                    relevance = classify_title_relevance(title)
                     articles.append({
                         "title": title,
                         "publisher": "",  # 네이버 API는 매체명 미제공 — 도메인으로 후속 판별
@@ -372,6 +477,12 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
                         "published_at_kst": pub.strftime("%Y-%m-%d %H:%M"),
                         "queries": [f"{label}:{query}"],
                         "engine": "naver-api",
+                        "relevance_hint": relevance["status"],
+                        "relevance_reasons": relevance["reasons"],
+                        "location_hits": relevance["location_hits"],
+                        "education_subject_hits": relevance["subject_hits"],
+                        "student_story_hits": relevance["story_hits"],
+                        "negative_context_hits": relevance["negative_hits"],
                     })
                     added += 1
             print(f"네이버 API 보강: 대상 쿼리 {len(supplement_queries)}개에서 신규 {added}건 추가")
@@ -392,6 +503,17 @@ def self_test():
     assert clean_url("https://a.kr/n?idxno=1&wlog_tag3=naver") == "https://a.kr/n?idxno=1"
     assert strip_html_tags("<b>인천</b>교육청 &quot;발표&quot;") == '인천교육청 "발표"'
     assert title_key("인천교육청, 발표!") == title_key("인천교육청 발표")
+    assert classify_title_relevance("인천의 학생, 전국대회 대상")["status"] == "likely_relevant"
+    assert classify_title_relevance("남동구 중학생 3명, 시민 구조")["status"] == "likely_relevant"
+    assert classify_title_relevance("서해구 학교 보건교사 응급대응 교육")["status"] == "likely_relevant"
+    assert classify_title_relevance("송도 고교생, 국제과학대회 우승")["status"] == "likely_relevant"
+    assert classify_title_relevance("청라 학생 선행 미담")["status"] == "likely_relevant"
+    assert classify_title_relevance("쿠팡, 인천 물류센터 화재 판매자 재고 전액 보상")["status"] == "likely_irrelevant"
+    assert classify_title_relevance("쿠팡CFS, 화재 피해 판매자 재고 전액 보상")["status"] == "likely_irrelevant"
+    assert classify_title_relevance("도성훈 인천시교육감, 신현초 임시주거시설 점검")["status"] == "likely_relevant"
+    assert classify_title_relevance("전국 학생 대상 공모전 개최")["status"] == "needs_review"
+    assert len(AREA_QUERIES) == 24
+    assert len(LOCALITY_QUERIES) == 4
     # 2026-07-13은 월요일 → 직전 업무일은 금요일 7/10
     assert previous_business_day(datetime(2026, 7, 13)) == datetime(2026, 7, 10)
     assert previous_business_day(datetime(2026, 7, 17)) == datetime(2026, 7, 16)

@@ -63,6 +63,26 @@ Treat this page as the primary naming reference unless a newer official organiza
 
 Include district offices of education when the reporting subject is an agency action, budget, policy implementation, school support, safety response, or institutional controversy.
 
+## School And Student Location Evidence
+
+Use the official 인천광역시교육청 [학교현황](https://www.ice.go.kr/ice/func/spm/selectSpmMngList.do?mi=10878) page to verify exact school names and addresses. Do not maintain an unverified hand-written list of all schools.
+
+For 2026-07-01 onward, the official 2군·9구 location set is:
+
+- 군: 강화군, 옹진군
+- 구: 제물포구, 영종구, 미추홀구, 연수구, 남동구, 부평구, 계양구, 서해구, 검단구
+
+Treat a school or student as tied to Incheon when at least one location-evidence path is confirmed:
+
+1. An exact school name is verified in the official Incheon school directory.
+2. The article says `인천 관내`, `인천의`, `인천에 있는`, `인천 소재`, or an equivalent explicit phrase next to the school/student.
+3. An official Incheon gun/gu name is connected to the school/student in the title, same sentence, or same paragraph.
+4. A locality such as 송도, 청라, 영종, 검단, 구월, 논현, 석남, 검암, 가정, 주안, 부개, 계산, 운서, 신현, 가좌, or 만수 is connected to the school/student and the article body or official school address confirms that the locality is in Incheon.
+
+A locality marker alone is never sufficient. Require an education subject and confirm that the school/student is a main actor, beneficiary, victim, or directly affected party.
+
+Student competition awards, prizes, inventions, scholarships, good deeds, rescue, volunteering, donations, and similar positive stories are valid coverage when the student's Incheon tie is confirmed. These story terms raise reporting value but do not prove location by themselves.
+
 ## Inclusion Test
 
 Include the item when at least one is true:

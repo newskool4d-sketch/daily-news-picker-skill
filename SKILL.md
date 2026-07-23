@@ -51,7 +51,7 @@ Use the deep-research pattern in a faster news-monitoring form:
    If the request date is a weekend or public holiday, say that the default briefing is skipped unless the user explicitly requests a manual run.
 2. Collect candidate articles, preferring the deterministic RSS collector.
    If shell execution is available, run [scripts/collect_news_rss.py](./scripts/collect_news_rss.py) first:
-   it fetches the full Q1~Q5 query set from Google News RSS, filters to the check window (KST),
+   it fetches the full Q1~Q7 query set from Google News RSS, filters to the check window (KST),
    de-duplicates, and resolves original media URLs into `collected_articles.json` (실측 2026-07-17: 107건 수집, 원문 URL 복원 107/107).
    Queries that hit the 100-item cap or fail are automatically supplemented from the Naver News API when
    `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET` env vars exist; treat `engine: naver-api` entries as unfiltered
@@ -60,6 +60,7 @@ Use the deep-research pattern in a faster news-monitoring form:
    If shell execution is not available, search recent coverage with external press article links first:
    start with institution-name queries in news search, then run the monitored-outlet source-seed checks from [references/media-sources.md](./references/media-sources.md).
    Always run the Q5 directly-affiliated-institution and library loop from [references/search-recipes.md](./references/search-recipes.md) every business day, not only on low-count days: 직속기관·도서관 are frequently reported under their own names only and are missed by 본청/지원청 keywords.
+   Run the Q6 official gun/gu school/student loop and Q7 송도·청라 locality loop so school names, student awards, and good-deed stories reported without education-office keywords remain discoverable.
    Also run the `인천교육감` query (Q4) for 교육감 동정·인사·외부 직위 coverage that 본청 keywords can miss.
    Use official institution pages only to verify facts, institution names, dates, and background, not as the default selected article link.
    If an `ice.go.kr` page is an official press release copied by many outlets, find and prefer the actual media article URL unless no accessible external article exists.
@@ -128,6 +129,8 @@ Use [references/selection-output-rules.md](references/selection-output-rules.md)
 - Treat `인천광역시교육청` as the top-level institution.
 - Include 산하 교육지원청 and 직속기관 when they are named explicitly or clearly fall within the user request.
 - If the user says only `인천교육청`, include both 본청 and obviously affiliated bodies, but keep the ranking centered on institution-level importance.
+- Include school/student stories when an exact Incheon school, explicit Incheon phrase, official gun/gu, or verified locality establishes the Incheon tie and the education subject is central to the article.
+- Do not include a regional business, incident, or disaster article merely because `인천` appears; require a direct education-office, school, student, teacher, parent, facility, or school-operation relationship.
 - If the user asks for a narrower subset such as `학생교육원만`, filter strictly.
 
 ## Edge Cases

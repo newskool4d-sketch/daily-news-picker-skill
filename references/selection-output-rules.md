@@ -14,6 +14,23 @@ Do not use an official education-office press release as the representative sele
 If an official `언론보도 현황` page lists or mirrors coverage, follow the original media article URL where available.
 For the monitored outlet roster and excluded source types, see [media-sources.md](./media-sources.md) and [search-recipes.md](./search-recipes.md).
 
+## School And Student Relevance Gate
+
+For school/student coverage, require all three:
+
+1. **Education subject**: a school, student, teacher, parent, education institution, or education facility is identified.
+2. **Incheon evidence**: an exact official Incheon school name, an explicit `인천 관내/인천의/인천 소재` phrase, an official Incheon gun/gu, or a verified Incheon locality is connected to that subject.
+3. **Article centrality**: the education subject is a main actor, beneficiary, victim, response body, or directly affected party rather than a passing mention.
+
+Use the article body, not just the headline, to confirm the relationship. Student award and good-deed terms are relevance boosters, not location proof.
+
+Apply incident relevance article by article. Do not block an event name globally: exclude a regional commercial or disaster article that has no education relationship, while keeping separate coverage about education-office response, school evacuation or shelter use, student safety, or school-operation impact.
+
+The collector's `relevance_hint` is triage metadata only:
+
+- `likely_relevant`: the title has an Incheon education-office marker, or both Incheon-location and education-subject evidence.
+- `likely_irrelevant`: the title has an Incheon location or clear commercial context but no education subject. Exclude unless the full article proves a direct education relationship.
+- `needs_review`: title evidence is incomplete; verify exact school names, addresses, and article-body context before deciding.
 ## Selection
 
 - Keep items tied to policy, budget, projects, student safety, education activity, audits, organization operation, facilities, hiring, awards, agreements, complaints, incidents, or accidents.

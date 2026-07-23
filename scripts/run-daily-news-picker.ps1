@@ -623,7 +623,14 @@ Apply these rules:
 - Check window: $windowStartDisplay ~ $windowEndDisplay Asia/Seoul
 - Use this exact check window. Do not reinterpret the report date as the article date or move the window to the following day.
 - Exclude any article published or updated after $windowEndDisplay. The verification memo must repeat exactly $windowStartDisplay through $windowEndDisplay, not the actual collection finish time.
-- Scope: Incheon Metropolitan Office of Education, district offices of education, and affiliated institutions
+- Scope: Incheon Metropolitan Office of Education, district offices of education, affiliated institutions, Incheon schools, and students who are clearly tied to Incheon
+- For school/student stories, require both an education subject (school, student, teacher, parent, or education institution) and concrete Incheon evidence
+- Accept concrete Incheon evidence from an exact official Incheon school name; wording such as `인천 관내`, `인천의`, `인천에 있는`, or `인천 소재`; an official Incheon gun/gu name; or a verified Incheon locality such as 송도 or 청라
+- Official 2026-07-01 gun/gu names are 강화군, 옹진군, 제물포구, 영종구, 미추홀구, 연수구, 남동구, 부평구, 계양구, 서해구, and 검단구
+- Treat locality-only names as evidence to verify, not automatic inclusion. Confirm an exact school, address, or explicit Incheon relationship in the article body
+- Student competition awards, prizes, inventions, scholarships, good deeds, rescue, volunteering, and other positive stories are valid coverage when the student's Incheon tie is confirmed
+- A regional incident or business story is not education coverage merely because `인천` appears. Exclude it when no education office, school, student, teacher, parent, education facility, or direct school impact is central to the article
+- Apply the incident rule article by article: a commercial compensation story can be excluded while a separate article about education-office response, school evacuation/shelter use, student safety, or school operation impact can be included
 - Use original external media article links first; do not use `ice.go.kr` press releases as representative selected article links when an accessible media article exists
 - Treat user-provided/reference outlet links as monitored media sources
 - Run monitored outlet domain checks from media-sources.md, especially if candidate count is low
@@ -721,6 +728,8 @@ produced by the skill's deterministic collector (Google News RSS primary + Naver
 with original media URLs already resolved.
 - Use it as the primary candidate pool. Do not redo broad first-pass collection from scratch.
 - Verify the relevance of every entry before including it. Entries with ``"engine": "naver-api"`` are unfiltered keyword matches and require an explicit relevance check.
+- Use ``relevance_hint`` only as triage metadata, never as the final decision. ``likely_irrelevant`` means the title has an Incheon location or clear commercial context but no education subject; exclude it unless the full article proves a direct education relationship. ``needs_review`` preserves exact school names and low-context titles for body verification.
+- Check the ``relevance_reasons``, ``location_hits``, ``education_subject_hits``, and ``student_story_hits`` fields and state a concrete inclusion relationship in your reasoning before selecting school/student items.
 - Check the ``failures`` field: queries listed there may be under-collected, so supplement those specific queries with targeted searches per the skill's recipes.
 - Still apply the skill's selection, deduplication, ranking, verification, and output rules to the pool.
 "@
@@ -863,12 +872,9 @@ try {
         Remove-IfExists -Path $ingestLog
         try {
             $env:PYTHONIOENCODING = "utf-8"
-            # 순서 중요: 선별본(briefing)을 먼저 넣어야 브리핑 기사가 briefing-md 배치로 저장되어
-            # 하류의 --selected(선별 기사) 필터가 작동한다. 후보 풀(json)은 그 뒤에.
+            # 공개 다이제스트에는 본문까지 검증된 최종 선별본만 넣는다.
+            # 원시 후보 JSON을 함께 ingest하면 제목에 '인천'만 있는 상업·사건 기사가 노출될 수 있다.
             & $PythonCommand $organizerScript ingest --briefing $markdownPath *>> $ingestLog
-            if (Test-NonEmptyFile -Path $collectedJsonPath) {
-                & $PythonCommand $organizerScript ingest --json $collectedJsonPath *>> $ingestLog
-            }
             & $PythonCommand $organizerScript group --date $reportDateDisplay *>> $ingestLog
             # 프리미엄 HTML 다이제스트를 보고 폴더에 함께 생성 (브리핑과 나란히)
             $digestHtmlPath = Join-Path $reportDir "교육뉴스 다이제스트.html"
