@@ -872,9 +872,12 @@ try {
         Remove-IfExists -Path $ingestLog
         try {
             $env:PYTHONIOENCODING = "utf-8"
-            # 공개 다이제스트에는 본문까지 검증된 최종 선별본만 넣는다.
-            # 원시 후보 JSON을 함께 ingest하면 제목에 '인천'만 있는 상업·사건 기사가 노출될 수 있다.
+            # 7/23 운영 방식 유지: 선별본을 먼저 넣어 selected 표시를 보존한 뒤
+            # 전체 후보 JSON도 넣어 수집 기사 집합과 동일보도 묶음을 유지한다.
             & $PythonCommand $organizerScript ingest --briefing $markdownPath *>> $ingestLog
+            if (Test-NonEmptyFile -Path $collectedJsonPath) {
+                & $PythonCommand $organizerScript ingest --json $collectedJsonPath *>> $ingestLog
+            }
             & $PythonCommand $organizerScript group --date $reportDateDisplay *>> $ingestLog
             # 프리미엄 HTML 다이제스트를 보고 폴더에 함께 생성 (브리핑과 나란히)
             $digestHtmlPath = Join-Path $reportDir "교육뉴스 다이제스트.html"

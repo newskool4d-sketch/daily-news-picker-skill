@@ -76,10 +76,14 @@ class RelevanceRulesTest(unittest.TestCase):
         ):
             self.assertIn(query, queries)
 
-    def test_runner_does_not_publish_raw_candidate_pool(self):
+    def test_runner_preserves_briefing_then_candidate_pool_flow(self):
         runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
-        self.assertNotIn("ingest --json $collectedJsonPath", runner)
         self.assertIn("ingest --briefing $markdownPath", runner)
+        self.assertIn("ingest --json $collectedJsonPath", runner)
+        self.assertLess(
+            runner.index("ingest --briefing $markdownPath"),
+            runner.index("ingest --json $collectedJsonPath"),
+        )
 
 
 if __name__ == "__main__":
