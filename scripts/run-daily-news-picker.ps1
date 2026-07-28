@@ -585,6 +585,7 @@ $folderName = "인천교육청 언론보도 현황($reportDateStamp)"
 $reportDir = Join-Path $BasePath $folderName
 $markdownPath = Join-Path $reportDir "인천교육청 언론보도 현황.md"
 $htmlPath = Join-Path $reportDir "인천교육청 언론보도 현황.html"
+$persistedCollectedJsonPath = Join-Path $reportDir "collected_articles.json"
 $logPath = Join-Path $reportDir "run.log"
 $codexWorkRoot = Join-Path ([System.IO.Path]::GetTempPath()) "DailyNewsPickerCodexWork"
 # 고정 작업 폴더: 날짜별 폴더는 Codex 신뢰 목록([projects])에 매일 1건씩 쌓여 샌드박스 ACL 갱신을 비대화시킴
@@ -688,6 +689,14 @@ if (Test-Path $collectorPath) {
         $collectorProcess = Start-Process -FilePath $PythonCommand -ArgumentList ([string]::Join(' ', $quotedCollectorArgs)) -RedirectStandardOutput $collectorStdout -RedirectStandardError $collectorStderr -PassThru -NoNewWindow
         if (-not $collectorProcess.WaitForExit($CollectorTimeoutSeconds * 1000)) {
             try { $collectorProcess.Kill($true) } catch { Stop-Process -Id $collectorProcess.Id -Force -ErrorAction SilentlyContinue }
+            try {
+                if ($collectorProcess.WaitForExit(5000)) {
+                    # Start-Process 리디렉션 파일 핸들이 닫힐 때까지 완료 대기
+                    $collectorProcess.WaitForExit()
+                }
+            } catch {
+                # 수집기 종료 확인 실패가 Codex 폴백을 막지 않도록 한다.
+            }
             Write-RunLog -Path $logPath -Message "수집기 시간 초과 — Codex 자체 검색으로 폴백합니다."
         } elseif ($collectorProcess.ExitCode -ne 0) {
             Write-RunLog -Path $logPath -Message ("수집기 실패(exit {0}) — Codex 자체 검색으로 폴백합니다." -f $collectorProcess.ExitCode)
@@ -696,6 +705,7 @@ if (Test-Path $collectorPath) {
             if ($pool.article_count -ge 1) {
                 $collectorUsed = $true
                 $collectorCount = $pool.article_count
+                Copy-Item -Path $collectedJsonPath -Destination $persistedCollectedJsonPath -Force
                 Write-RunLog -Path $logPath -Message ("1차 수집 완료: {0}건 (수집 실패 쿼리 {1}건)" -f $pool.article_count, @($pool.failures).Count)
             } else {
                 Write-RunLog -Path $logPath -Message "1차 수집 0건 — Codex 자체 검색으로 폴백합니다."
@@ -709,8 +719,16 @@ if (Test-Path $collectorPath) {
         $env:PYTHONIOENCODING = $prevPyEnc
         foreach ($tempLog in @($collectorStdout, $collectorStderr)) {
             if (Test-Path $tempLog) {
-                [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($tempLog, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
-                Remove-Item -Path $tempLog -Force -ErrorAction SilentlyContinue
+                try {
+                    $tempLogText = [System.IO.File]::ReadAllText($tempLog, [System.Text.Encoding]::UTF8)
+                    if ($tempLogText) {
+                        [System.IO.File]::AppendAllText($logPath, $tempLogText, $script:Utf8NoBom)
+                    }
+                } catch {
+                    Write-RunLog -Path $logPath -Message ("수집기 임시 로그 읽기 실패(비치명): {0}" -f $_.Exception.Message)
+                } finally {
+                    Remove-Item -Path $tempLog -Force -ErrorAction SilentlyContinue
+                }
             }
         }
     }
@@ -875,8 +893,15 @@ try {
             # 7/23 운영 방식 유지: 선별본을 먼저 넣어 selected 표시를 보존한 뒤
             # 전체 후보 JSON도 넣어 수집 기사 집합과 동일보도 묶음을 유지한다.
             & $PythonCommand $organizerScript ingest --briefing $markdownPath *>> $ingestLog
-            if (Test-NonEmptyFile -Path $collectedJsonPath) {
-                & $PythonCommand $organizerScript ingest --json $collectedJsonPath *>> $ingestLog
+            $ingestJsonPath = if (Test-NonEmptyFile -Path $collectedJsonPath) {
+                $collectedJsonPath
+            } elseif ($collectorUsed -and (Test-NonEmptyFile -Path $persistedCollectedJsonPath)) {
+                $persistedCollectedJsonPath
+            } else {
+                $null
+            }
+            if ($ingestJsonPath) {
+                & $PythonCommand $organizerScript ingest --json $ingestJsonPath *>> $ingestLog
             }
             & $PythonCommand $organizerScript group --date $reportDateDisplay *>> $ingestLog
             # 프리미엄 HTML 다이제스트를 보고 폴더에 함께 생성 (브리핑과 나란히)
@@ -889,7 +914,13 @@ try {
             if ($env:EDU_NEWS_SITE_DIR) {
                 $publishScript = Join-Path $env:USERPROFILE ".codex\skills\edu-news-organizer\scripts\publish_site.py"
                 $pushFlag = if ($env:EDU_NEWS_SITE_PUSH -eq "1") { "--push" } else { "" }
-                & $PythonCommand $publishScript --site-dir $env:EDU_NEWS_SITE_DIR --date $reportDateDisplay $pushFlag *>> $ingestLog
+                $prevPythonUtf8 = $env:PYTHONUTF8
+                try {
+                    $env:PYTHONUTF8 = "1"
+                    & $PythonCommand $publishScript --site-dir $env:EDU_NEWS_SITE_DIR --date $reportDateDisplay $pushFlag *>> $ingestLog
+                } finally {
+                    $env:PYTHONUTF8 = $prevPythonUtf8
+                }
                 Write-RunLog -Path $logPath -Message ("정적 사이트 배포 완료 (공개 안전본 → {0}, push={1})" -f $env:EDU_NEWS_SITE_DIR, ($env:EDU_NEWS_SITE_PUSH -eq "1"))
             }
         } catch {
@@ -904,6 +935,7 @@ catch {
 
     Remove-IfExists -Path $markdownPath
     Remove-IfExists -Path $htmlPath
+    Remove-IfExists -Path $persistedCollectedJsonPath
     if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $lastMessagePath) {
         Remove-IfExists -Path $generatedMarkdown.FullName
     }

@@ -26,6 +26,7 @@ import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
@@ -33,6 +34,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 KST = timezone(timedelta(hours=9))
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+RESOLVE_TIMEOUT_SECONDS = 8
+RESOLVE_MAX_WORKERS = 24
+RESOLVE_RETRY_DELAY_SECONDS = 0.5
 
 # 검색어 세트 — references/search-recipes.md 의 Q1~Q7과 동기 유지할 것.
 # 직속기관 목록 정본: references/institution-scope.md
@@ -312,7 +316,7 @@ def resolve_original_url(google_link: str):
         return None
     article_id = m.group(1)
     req = urllib.request.Request(google_link, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with urllib.request.urlopen(req, timeout=RESOLVE_TIMEOUT_SECONDS) as resp:
         body = resp.read().decode("utf-8", errors="replace")
     sig = re.search(r'data-n-a-sg="([^"]+)"', body)
     ts = re.search(r'data-n-a-ts="([^"]+)"', body)
@@ -331,7 +335,7 @@ def resolve_original_url(google_link: str):
         data=data,
         headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
     )
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with urllib.request.urlopen(req, timeout=RESOLVE_TIMEOUT_SECONDS) as resp:
         text = resp.read().decode("utf-8", errors="replace")
     for line in text.splitlines():
         if '"Fbv4je"' not in line:
@@ -356,6 +360,41 @@ def resolve_original_url(google_link: str):
                 if found:
                     return found[0]
     return None
+
+
+def resolve_article_urls(articles, max_workers=RESOLVE_MAX_WORKERS):
+    """Google News 후보의 원문 URL을 제한된 병렬 작업으로 복원한다."""
+    if not articles:
+        return 0
+
+    def resolve_one(article):
+        for attempt in (1, 2):
+            try:
+                return resolve_original_url(article["google_url"])
+            except Exception:
+                if attempt == 2:
+                    return None
+                time.sleep(RESOLVE_RETRY_DELAY_SECONDS)
+        return None
+
+    workers = max(1, min(max_workers, len(articles)))
+    with ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="gnews-resolve"
+    ) as executor:
+        futures = {executor.submit(resolve_one, article): article for article in articles}
+        for completed, future in enumerate(as_completed(futures), 1):
+            article = futures[future]
+            try:
+                url = future.result()
+            except Exception:
+                url = None
+            if url:
+                article["original_url"] = clean_url(url)
+                article["url_status"] = "복원"
+            if completed % 25 == 0:
+                print(f"  {completed}/{len(articles)}")
+
+    return sum(1 for article in articles if article["url_status"] == "복원")
 
 
 def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
@@ -416,22 +455,7 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
 
     if resolve:
         print(f"\n원문 URL 복원 중... ({len(articles)}건)")
-        for i, art in enumerate(articles, 1):
-            for attempt in (1, 2):
-                try:
-                    url = resolve_original_url(art["google_url"])
-                    if url:
-                        art["original_url"] = clean_url(url)
-                        art["url_status"] = "복원"
-                    break
-                except Exception:
-                    if attempt == 2:
-                        break
-                    time.sleep(2)
-            time.sleep(0.5)
-            if i % 10 == 0:
-                print(f"  {i}/{len(articles)}")
-        resolved = sum(1 for a in articles if a["url_status"] == "복원")
+        resolved = resolve_article_urls(articles)
         print(f"복원 완료: {resolved}/{len(articles)}")
 
     # 상한 도달·수집 실패 쿼리는 네이버 뉴스 API로 보강 (키 없으면 건너뜀)

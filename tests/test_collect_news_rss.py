@@ -2,6 +2,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,11 +80,42 @@ class RelevanceRulesTest(unittest.TestCase):
     def test_runner_preserves_briefing_then_candidate_pool_flow(self):
         runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
         self.assertIn("ingest --briefing $markdownPath", runner)
-        self.assertIn("ingest --json $collectedJsonPath", runner)
+        self.assertIn("Copy-Item -Path $collectedJsonPath -Destination $persistedCollectedJsonPath", runner)
+        self.assertIn("ingest --json $ingestJsonPath", runner)
         self.assertLess(
             runner.index("ingest --briefing $markdownPath"),
-            runner.index("ingest --json $collectedJsonPath"),
+            runner.index("ingest --json $ingestJsonPath"),
         )
+
+    def test_runner_timeout_cleanup_cannot_block_codex_fallback(self):
+        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
+        self.assertIn("$collectorProcess.WaitForExit(5000)", runner)
+        self.assertIn("수집기 임시 로그 읽기 실패(비치명)", runner)
+
+
+class OriginalUrlResolutionTest(unittest.TestCase):
+    def test_resolves_articles_with_bounded_workers_and_preserves_order(self):
+        articles = [
+            {
+                "google_url": f"https://news.google.com/articles/{index}",
+                "original_url": f"https://news.google.com/articles/{index}",
+                "url_status": "구글뉴스",
+            }
+            for index in range(3)
+        ]
+
+        def fake_resolve(url):
+            return url.replace("https://news.google.com/articles/", "https://example.com/")
+
+        with mock.patch.object(NEWS, "resolve_original_url", side_effect=fake_resolve):
+            resolved = NEWS.resolve_article_urls(articles, max_workers=2)
+
+        self.assertEqual(3, resolved)
+        self.assertEqual(
+            ["https://example.com/0", "https://example.com/1", "https://example.com/2"],
+            [article["original_url"] for article in articles],
+        )
+        self.assertTrue(all(article["url_status"] == "복원" for article in articles))
 
 
 if __name__ == "__main__":
