@@ -2,8 +2,10 @@
     [string]$BasePath = $env:DAILY_NEWS_OUTPUT_DIR,
     [string]$WorkingRoot = $env:USERPROFILE,
     [string]$CodexCommand = $(if (Test-Path (Join-Path $env:APPDATA "npm\codex.cmd")) { Join-Path $env:APPDATA "npm\codex.cmd" } else { "codex" }),
-    [string]$Model = "gpt-5.5",
+    [string]$Model = "gpt-5.6-sol",
     [string]$PythonCommand = "python",
+    [string]$SiteDir = $env:EDU_NEWS_SITE_DIR,
+    [bool]$EnablePublicPush = ($env:EDU_NEWS_SITE_PUSH -eq "1"),
     [timespan]$CollectionTime = ([timespan]"05:00"),
     [int]$CollectorTimeoutSeconds = 600,
     [int]$CodexTimeoutSeconds = 1800,
@@ -22,6 +24,14 @@ $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 if ([string]::IsNullOrWhiteSpace($BasePath)) {
     throw "BasePath가 비어 있습니다. -BasePath를 지정하거나 DAILY_NEWS_OUTPUT_DIR 환경변수를 설정하세요."
 }
+
+if ($EnablePublicPush -and [string]::IsNullOrWhiteSpace($SiteDir)) {
+    throw "공개 배포를 켜려면 -SiteDir를 지정하거나 EDU_NEWS_SITE_DIR 환경변수를 설정하세요."
+}
+
+# 예약 작업은 사용자 환경변수에 의존하지 않도록 명시 인수를 프로세스 범위에 고정한다.
+$env:EDU_NEWS_SITE_DIR = $SiteDir
+$env:EDU_NEWS_SITE_PUSH = if ($EnablePublicPush) { "1" } else { "0" }
 
 if ($CollectionTime -lt [timespan]::Zero -or $CollectionTime -ge [timespan]::FromDays(1)) {
     throw "CollectionTime은 00:00 이상 24:00 미만이어야 합니다: $CollectionTime"
@@ -43,6 +53,21 @@ function Write-RunLog {
     Write-Host $line
     if ($Path) {
         [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, $script:Utf8NoBom)
+    }
+}
+
+function Invoke-LoggedNativeCommand {
+    param(
+        [string]$Step,
+        [string]$Command,
+        [string[]]$Arguments,
+        [string]$LogPath
+    )
+
+    & $Command @Arguments *>> $LogPath
+    $nativeExitCode = $LASTEXITCODE
+    if ($nativeExitCode -ne 0) {
+        throw ("{0} 실패(exit {1}) — {2} 확인" -f $Step, $nativeExitCode, $LogPath)
     }
 }
 
@@ -586,10 +611,14 @@ $reportDir = Join-Path $BasePath $folderName
 $markdownPath = Join-Path $reportDir "인천교육청 언론보도 현황.md"
 $htmlPath = Join-Path $reportDir "인천교육청 언론보도 현황.html"
 $persistedCollectedJsonPath = Join-Path $reportDir "collected_articles.json"
+$persistedVerifiedCollectedJsonPath = Join-Path $reportDir "verified_collected_articles.json"
+$verificationManifestPath = Join-Path $reportDir "verification-manifest.json"
+$verificationLogPath = Join-Path $reportDir "verification-promotion.log"
 $logPath = Join-Path $reportDir "run.log"
 $codexWorkRoot = Join-Path ([System.IO.Path]::GetTempPath()) "DailyNewsPickerCodexWork"
 # 고정 작업 폴더: 날짜별 폴더는 Codex 신뢰 목록([projects])에 매일 1건씩 쌓여 샌드박스 ACL 갱신을 비대화시킴
 $codexWorkDir = Join-Path $codexWorkRoot "current"
+$verifiedCollectedJsonPath = Join-Path $codexWorkDir "verified_collected_articles.json"
 
 if (-not (Test-Path $BasePath)) {
     New-Item -ItemType Directory -Force -Path $BasePath | Out-Null
@@ -610,6 +639,7 @@ New-Item -ItemType Directory -Force -Path $codexWorkDir | Out-Null
 # 고정 폴더 재사용: 이전 실행 산출물이 이번 실행 결과로 오인되지 않도록 제거
 Remove-Item -Path (Join-Path $codexWorkDir "last-message.md") -Force -ErrorAction SilentlyContinue
 Remove-Item -Path (Join-Path $codexWorkDir "collected_articles.json") -Force -ErrorAction SilentlyContinue
+Remove-Item -Path (Join-Path $codexWorkDir "verified_collected_articles.json") -Force -ErrorAction SilentlyContinue
 
 $prompt = @"
 Use `$daily-news-picker at C:\Users\홍주형\.codex\skills\daily-news-picker\SKILL.md.
@@ -632,6 +662,8 @@ Apply these rules:
 - Student competition awards, prizes, inventions, scholarships, good deeds, rescue, volunteering, and other positive stories are valid coverage when the student's Incheon tie is confirmed
 - A regional incident or business story is not education coverage merely because `인천` appears. Exclude it when no education office, school, student, teacher, parent, education facility, or direct school impact is central to the article
 - Apply the incident rule article by article: a commercial compensation story can be excluded while a separate article about education-office response, school evacuation/shelter use, student safety, or school operation impact can be included
+- For coverage led by 인천시청, a 군청·구청, or a local-government facility/foundation, require the article body to name an Incheon education office/affiliated institution as an official partner, an Incheon school as an official participant or operator, or a direct effect on school operations, safety, facilities, curriculum, or student protection
+- A local-government event, welfare/care program, award, scholarship, experience, or youth-facility activity is not education-office coverage merely because children, youth, students, or parents participate. Exclude it when the institutional link above is not confirmed
 - Use original external media article links first; do not use `ice.go.kr` press releases as representative selected article links when an accessible media article exists
 - Treat user-provided/reference outlet links as monitored media sources
 - Run monitored outlet domain checks from media-sources.md, especially if candidate count is low
@@ -652,7 +684,14 @@ Apply these rules:
 
 Write the final answer in Korean as a complete Markdown report ready to save directly to disk.
 The first line must be `# 인천교육청 언론보도 현황`.
-Output only the final report body.
+For every collector candidate that you include after checking its article body, append this exact machine-readable
+block at the very end of the report (use [] when no collector candidate is verified for publication):
+<!-- DAILY_NEWS_VERIFIED_CANDIDATES
+[{"original_url":"https://...","verified":true,"publication_eligible":true,"verification_basis":"본문에서 확인한 구체적 기관·학교·영향 관계"}]
+DAILY_NEWS_VERIFIED_CANDIDATES -->
+The runner removes this block before saving the public Markdown/HTML. Do not put a candidate in the block unless its
+article body was checked and the candidate is included in the report. The verification_basis must state the concrete
+body evidence, not just repeat the title or say "관련 있음".
 "@
 
 $promptPath = Join-Path $reportDir "prompt.txt"
@@ -746,7 +785,7 @@ produced by the skill's deterministic collector (Google News RSS primary + Naver
 with original media URLs already resolved.
 - Use it as the primary candidate pool. Do not redo broad first-pass collection from scratch.
 - Verify the relevance of every entry before including it. Entries with ``"engine": "naver-api"`` are unfiltered keyword matches and require an explicit relevance check.
-- Use ``relevance_hint`` only as triage metadata, never as the final decision. ``likely_irrelevant`` means the title has an Incheon location or clear commercial context but no education subject; exclude it unless the full article proves a direct education relationship. ``needs_review`` preserves exact school names and low-context titles for body verification.
+- Use ``relevance_hint`` only as triage metadata, never as the final decision. ``likely_irrelevant`` means the title has an Incheon location or clear commercial context but no education subject; ``needs_review`` preserves exact school names and low-context titles for body verification. Collector candidates carry ``publication_eligible: false`` by default; do not treat ``likely_relevant`` or ``needs_review`` as permission to publish before article-body verification.
 - Check the ``relevance_reasons``, ``location_hits``, ``education_subject_hits``, and ``student_story_hits`` fields and state a concrete inclusion relationship in your reasoning before selecting school/student items.
 - Check the ``failures`` field: queries listed there may be under-collected, so supplement those specific queries with targeted searches per the skill's recipes.
 - Still apply the skill's selection, deduplication, ranking, verification, and output rules to the pool.
@@ -774,6 +813,8 @@ $generatedMarkdown = $null
 $generatedHtml = $null
 $process = $null
 $timedOut = $false
+$verificationFailed = $false
+$verifiedCandidateAvailable = $false
 
 Write-RunLog -Path $logPath -Message "STATUS: STARTED"
 Write-RunLog -Path $logPath -Message ("설정: model={0}, bypass={1}, output={2}, codexWorkDir={3}, timeoutSeconds={4}" -f $Model, $DangerouslyBypassApprovalsAndSandbox.IsPresent, $reportDir, $codexWorkDir, $CodexTimeoutSeconds)
@@ -874,58 +915,134 @@ try {
         throw "Markdown 결과가 보고서 본문 형식이 아닙니다."
     }
 
+    # ---- 본문 검증 후보 자동 승격 ----
+    # Codex의 구조화 검증 표식만 별도 산출 JSON으로 승격하고, 원본 후보 JSON은 그대로 보존한다.
+    # 수집기 폴백으로 후보 JSON이 없어도 helper를 호출해 내부 표식이 공개본에 남지 않게 한다.
+    $promotionScript = Join-Path $PSScriptRoot "promote_verified_candidates.py"
+    $candidateInputAvailable = $collectorUsed -and (Test-NonEmptyFile -Path $collectedJsonPath)
+    $promotionArgs = @(
+        $promotionScript,
+        "--report", $markdownPath,
+        "--output", $verifiedCollectedJsonPath,
+        "--manifest-output", $verificationManifestPath
+    )
+    if ($candidateInputAvailable) {
+        $promotionArgs = @(
+            $promotionScript,
+            "--input", $collectedJsonPath,
+            "--report", $markdownPath,
+            "--output", $verifiedCollectedJsonPath,
+            "--manifest-output", $verificationManifestPath
+        )
+    }
+    try {
+        Remove-IfExists -Path $verificationLogPath
+        & $PythonCommand @promotionArgs *> $verificationLogPath
+        $promotionExitCode = $LASTEXITCODE
+        if (($promotionExitCode -ne 0) -or (-not (Test-NonEmptyFile -Path $verifiedCollectedJsonPath))) {
+            $verificationFailed = $true
+            Write-RunLog -Path $logPath -Message ("본문 검증 후보 승격 실패(exit {0}) — 원본 후보는 비공개로 유지합니다: {1}" -f $promotionExitCode, $verificationLogPath)
+        } else {
+            Copy-Item -Path $verifiedCollectedJsonPath -Destination $persistedVerifiedCollectedJsonPath -Force
+            $verifiedCandidateAvailable = $candidateInputAvailable
+            $promotionSummary = Get-Content -Path $verificationLogPath -Raw -Encoding UTF8
+            Write-RunLog -Path $logPath -Message ("본문 검증 후보 승격 완료 — {0}" -f $promotionSummary.Trim())
+        }
+    } catch {
+        $verificationFailed = $true
+        Write-RunLog -Path $logPath -Message ("본문 검증 후보 승격 오류 — 원본 후보는 비공개로 유지합니다: {0}" -f $_.Exception.Message)
+    }
+
     Convert-MarkdownToHtmlDocument -MarkdownPath $markdownPath -HtmlPath $htmlPath -Title $folderName
 
     if (-not (Test-NonEmptyFile -Path $htmlPath)) {
         throw "HTML 결과가 비어 있거나 생성되지 않았습니다."
     }
 
-    Write-RunLog -Path $logPath -Message "STATUS: SUCCEEDED"
-    Write-RunLog -Path $logPath -Message "생성 완료: $reportDir"
-
-    # ---- 하류 자동 인제스트 (edu-news-organizer) — 실패해도 브리핑 성공에는 영향 없음 ----
+    # ---- 하류 자동 인제스트 (edu-news-organizer) ----
+    # SiteDir가 지정되었거나 공개 push가 요청된 경우 하류 산출물은 필수다.
+    $downstreamFailed = $false
+    $downstreamRequired = (-not [string]::IsNullOrWhiteSpace($SiteDir)) -or $EnablePublicPush
     $organizerScript = Join-Path $env:USERPROFILE ".codex\skills\edu-news-organizer\scripts\newsdb.py"
     if (Test-Path $organizerScript) {
         $ingestLog = Join-Path $reportDir "organizer-ingest.log"
         Remove-IfExists -Path $ingestLog
         try {
             $env:PYTHONIOENCODING = "utf-8"
-            # 7/23 운영 방식 유지: 선별본을 먼저 넣어 selected 표시를 보존한 뒤
-            # 전체 후보 JSON도 넣어 수집 기사 집합과 동일보도 묶음을 유지한다.
-            & $PythonCommand $organizerScript ingest --briefing $markdownPath *>> $ingestLog
-            $ingestJsonPath = if (Test-NonEmptyFile -Path $collectedJsonPath) {
+            # 이전 승인 흐름 유지: 브리핑을 먼저 넣고 후보 원본·메타데이터를 이어서 보존한다.
+            # 공개본은 브리핑 명시 기사와 본문 검증을 거쳐 명시적으로 승격된 후보만 사용한다.
+            $ingestJsonPath = if ($verifiedCandidateAvailable -and (Test-NonEmptyFile -Path $persistedVerifiedCollectedJsonPath)) {
+                $persistedVerifiedCollectedJsonPath
+            } elseif (Test-NonEmptyFile -Path $collectedJsonPath) {
                 $collectedJsonPath
             } elseif ($collectorUsed -and (Test-NonEmptyFile -Path $persistedCollectedJsonPath)) {
                 $persistedCollectedJsonPath
             } else {
                 $null
             }
+            Invoke-LoggedNativeCommand -Step "브리핑 인제스트" -Command $PythonCommand `
+                -Arguments @($organizerScript, "ingest", "--briefing", $markdownPath) -LogPath $ingestLog
             if ($ingestJsonPath) {
-                & $PythonCommand $organizerScript ingest --json $ingestJsonPath *>> $ingestLog
+                Invoke-LoggedNativeCommand -Step "후보 JSON 인제스트" -Command $PythonCommand `
+                    -Arguments @($organizerScript, "ingest", "--json", $ingestJsonPath) -LogPath $ingestLog
             }
-            & $PythonCommand $organizerScript group --date $reportDateDisplay *>> $ingestLog
+            Invoke-LoggedNativeCommand -Step "동일보도 묶음" -Command $PythonCommand `
+                -Arguments @($organizerScript, "group", "--date", $reportDateDisplay) -LogPath $ingestLog
             # 프리미엄 HTML 다이제스트를 보고 폴더에 함께 생성 (브리핑과 나란히)
             $digestHtmlPath = Join-Path $reportDir "교육뉴스 다이제스트.html"
-            & $PythonCommand $organizerScript digest --date $reportDateDisplay --format html --out $digestHtmlPath *>> $ingestLog
+            Invoke-LoggedNativeCommand -Step "HTML 다이제스트 생성" -Command $PythonCommand `
+                -Arguments @($organizerScript, "digest", "--date", $reportDateDisplay, "--format", "html", "--out", $digestHtmlPath) `
+                -LogPath $ingestLog
+            if (-not (Test-NonEmptyFile -Path $digestHtmlPath)) {
+                throw "HTML 다이제스트가 생성되지 않았습니다: $digestHtmlPath"
+            }
             Write-RunLog -Path $logPath -Message "하류 인제스트·다이제스트 완료 (edu-news-organizer → organizer-ingest.log, 교육뉴스 다이제스트.html)"
 
             # 정적 사이트 배포(A안): EDU_NEWS_SITE_DIR가 설정된 경우에만 공개 안전본을 굽고 git push
             # (개인 데이터 제외·비공식 표기 — publish_site.py가 --public 렌더). 미설정 시 조용히 생략.
             if ($env:EDU_NEWS_SITE_DIR) {
                 $publishScript = Join-Path $env:USERPROFILE ".codex\skills\edu-news-organizer\scripts\publish_site.py"
-                $pushFlag = if ($env:EDU_NEWS_SITE_PUSH -eq "1") { "--push" } else { "" }
                 $prevPythonUtf8 = $env:PYTHONUTF8
                 try {
                     $env:PYTHONUTF8 = "1"
-                    & $PythonCommand $publishScript --site-dir $env:EDU_NEWS_SITE_DIR --date $reportDateDisplay $pushFlag *>> $ingestLog
+                    $publishArgs = @($publishScript, "--site-dir", $env:EDU_NEWS_SITE_DIR, "--date", $reportDateDisplay)
+                    if ($env:EDU_NEWS_SITE_PUSH -eq "1") {
+                        $publishArgs += "--push"
+                    }
+                    Invoke-LoggedNativeCommand -Step "정적 사이트 게시" -Command $PythonCommand `
+                        -Arguments $publishArgs -LogPath $ingestLog
+                    $archivePath = Join-Path $env:EDU_NEWS_SITE_DIR ("archive\{0}.html" -f $reportDateDisplay)
+                    if (-not (Test-NonEmptyFile -Path $archivePath)) {
+                        throw "날짜별 공개 아카이브가 생성되지 않았습니다: $archivePath"
+                    }
                 } finally {
                     $env:PYTHONUTF8 = $prevPythonUtf8
                 }
                 Write-RunLog -Path $logPath -Message ("정적 사이트 배포 완료 (공개 안전본 → {0}, push={1})" -f $env:EDU_NEWS_SITE_DIR, ($env:EDU_NEWS_SITE_PUSH -eq "1"))
             }
         } catch {
-            Write-RunLog -Path $logPath -Message ("하류 인제스트 실패(비치명): {0}" -f $_.Exception.Message)
+            $downstreamFailed = $true
+            Write-RunLog -Path $logPath -Message ("하류 처리 실패(비치명): {0}" -f $_.Exception.Message)
         }
+    } else {
+        $message = "하류 구성요소 없음: $organizerScript"
+        if ($downstreamRequired) {
+            $downstreamFailed = $true
+            Write-RunLog -Path $logPath -Message $message
+        } else {
+            Write-RunLog -Path $logPath -Message ("{0} — 로컬 브리핑만 유지합니다." -f $message)
+        }
+    }
+    if ($downstreamFailed) {
+        Write-RunLog -Path $logPath -Message "STATUS: PARTIAL [DOWNSTREAM]"
+    } elseif ($verificationFailed) {
+        Write-RunLog -Path $logPath -Message "STATUS: PARTIAL [VERIFICATION]"
+    } else {
+        Write-RunLog -Path $logPath -Message "STATUS: SUCCEEDED"
+    }
+    Write-RunLog -Path $logPath -Message "생성 완료: $reportDir"
+    if (($downstreamFailed -or $verificationFailed) -and $downstreamRequired) {
+        exit 1
     }
 }
 catch {
@@ -936,6 +1053,9 @@ catch {
     Remove-IfExists -Path $markdownPath
     Remove-IfExists -Path $htmlPath
     Remove-IfExists -Path $persistedCollectedJsonPath
+    Remove-IfExists -Path $persistedVerifiedCollectedJsonPath
+    Remove-IfExists -Path $verificationManifestPath
+    Remove-IfExists -Path $verificationLogPath
     if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $lastMessagePath) {
         Remove-IfExists -Path $generatedMarkdown.FullName
     }

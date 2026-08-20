@@ -110,6 +110,22 @@ NON_EDUCATION_BUSINESS_MARKERS = (
     "쿠팡", "물류센터", "판매자", "로켓그로스", "재고 손실", "전액 보상",
 )
 
+# 제목 분류는 수집·검토용 triage 메타데이터다. 본문 검증은 이 수집기에서 수행하지 않으므로
+# 후보를 공개 다이제스트에 바로 싣지 않는다. 검증 완료 후보만 후속 단계에서 명시적으로 승격한다.
+DEFAULT_PUBLICATION_ELIGIBLE = False
+
+# 지자체가 제목의 주체인 기사는 학생·청소년 대상이라는 이유만으로 교육 기사로 확정하지 않는다.
+# 제목 단계에서는 교육청·학교 연계가 함께 보이지 않으면 likely_irrelevant로 내려 본문 검증을 요구한다.
+LOCAL_GOVERNMENT_LEAD_RE = re.compile(
+    r"(?:^|[….!?]\s*)(?:(?:인천(?:광역)?시)|(?:인천(?:시)?\s+)?(?:"
+    + "|".join(re.escape(area) for area in INCHEON_ADMIN_AREAS)
+    + r"))(?:청)?\s*[,，:：·-]"
+)
+SCHOOL_LINK_RE = re.compile(r"[가-힣A-Za-z0-9]+(?:초|중|고)(?:교|\s|[,，·:：-]|$)")
+EDUCATION_INSTITUTION_LINK_MARKERS = (
+    "교육청", "교육지원청", "학교", "유치원", "교육원", "학교지원단",
+)
+
 # 배제 도메인 — 2026-07-17 실측에서 관찰된 비대상·재게재 소스
 EXCLUDED_DOMAINS = {
     "korean.people.com.cn",  # 인민넷
@@ -187,6 +203,17 @@ def classify_title_relevance(title: str) -> dict:
     subject_hits = [marker for marker in EDUCATION_SUBJECT_MARKERS if marker in compact]
     story_hits = [marker for marker in STUDENT_STORY_MARKERS if marker in compact]
     negative_hits = [marker for marker in NON_EDUCATION_BUSINESS_MARKERS if marker in compact]
+    local_government_lead = bool(LOCAL_GOVERNMENT_LEAD_RE.search(compact))
+    institution_link_hits = [
+        marker for marker in EDUCATION_INSTITUTION_LINK_MARKERS if marker in compact
+    ]
+    has_school_name_hint = bool(SCHOOL_LINK_RE.search(compact))
+    local_government_without_education_link = (
+        local_government_lead
+        and not office_hits
+        and not institution_link_hits
+        and not has_school_name_hint
+    )
 
     reasons = []
     if office_hits:
@@ -197,8 +224,13 @@ def classify_title_relevance(title: str) -> dict:
         reasons.append("education_subject")
     if story_hits:
         reasons.append("student_achievement_or_good_deed")
+    if local_government_lead:
+        reasons.append("local_government_lead")
 
-    if office_hits or (location_hits and subject_hits):
+    if local_government_without_education_link:
+        status = "likely_irrelevant"
+        reasons.append("local_government_without_education_link")
+    elif office_hits or (location_hits and subject_hits):
         status = "likely_relevant"
     elif not subject_hits and (location_hits or negative_hits):
         status = "likely_irrelevant"
@@ -439,6 +471,7 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
                 "queries": [f"{label}:{query}"],
                 "engine": "google-news-rss",
                 "relevance_hint": relevance["status"],
+                "publication_eligible": DEFAULT_PUBLICATION_ELIGIBLE,
                 "relevance_reasons": relevance["reasons"],
                 "location_hits": relevance["location_hits"],
                 "education_subject_hits": relevance["subject_hits"],
@@ -502,6 +535,7 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
                         "queries": [f"{label}:{query}"],
                         "engine": "naver-api",
                         "relevance_hint": relevance["status"],
+                        "publication_eligible": DEFAULT_PUBLICATION_ELIGIBLE,
                         "relevance_reasons": relevance["reasons"],
                         "location_hits": relevance["location_hits"],
                         "education_subject_hits": relevance["subject_hits"],

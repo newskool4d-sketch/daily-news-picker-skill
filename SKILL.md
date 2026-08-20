@@ -68,8 +68,11 @@ Use the deep-research pattern in a faster news-monitoring form:
    do not use multi-institution `OR` queries or local-newspaper section URLs (both empirically broken, see the recipe file).
    Treat user-provided reference links as monitored outlet evidence, not decorative examples.
 3. Read the actual external press article before selecting it.
-   Do not rely only on headlines, portal snippets, or syndicated summaries.
-   If only an official source page exists, label it as `공식 보도자료(대체)` or place it in `제외 또는 참고`; do not present it as an original article.
+    Do not rely only on headlines, portal snippets, or syndicated summaries.
+    If only an official source page exists, label it as `공식 보도자료(대체)` or place it in `제외 또는 참고`; do not present it as an original article.
+    In the scheduled runner, list every body-verified collector candidate included in the report in the
+    `DAILY_NEWS_VERIFIED_CANDIDATES` marker with its exact URL and concrete body evidence; the runner promotes only
+    those entries to `publication_eligible=true` and strips the internal marker before public output.
 4. Prioritize monitored press sources and original article links.
    Prefer journalist-bylined local, education-specialized, national, or agency articles over official press releases and institution notices.
    Use official press releases and notices as fact-checking or last-resort fallback sources only.
@@ -130,6 +133,7 @@ Use [references/selection-output-rules.md](references/selection-output-rules.md)
 - Include 산하 교육지원청 and 직속기관 when they are named explicitly or clearly fall within the user request.
 - If the user says only `인천교육청`, include both 본청 and obviously affiliated bodies, but keep the ranking centered on institution-level importance.
 - Include school/student stories when an exact Incheon school, explicit Incheon phrase, official gun/gu, or verified locality establishes the Incheon tie and the education subject is central to the article.
+- For city/county/district-office-led coverage, require a verified official partnership with an Incheon education-office entity or school, or a direct effect on school operations, safety, facilities, curriculum, or student protection. A child/youth/student/parent audience alone is insufficient.
 - Do not include a regional business, incident, or disaster article merely because `인천` appears; require a direct education-office, school, student, teacher, parent, facility, or school-operation relationship.
 - If the user asks for a narrower subset such as `학생교육원만`, filter strictly.
 

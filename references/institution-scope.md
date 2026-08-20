@@ -83,6 +83,19 @@ A locality marker alone is never sufficient. Require an education subject and co
 
 Student competition awards, prizes, inventions, scholarships, good deeds, rescue, volunteering, donations, and similar positive stories are valid coverage when the student's Incheon tie is confirmed. These story terms raise reporting value but do not prove location by themselves.
 
+## Local Government Partnership Gate
+
+인천시청·군청·구청과 그 산하 시설·재단이 주도한 행사, 복지, 돌봄, 체험, 표창, 장학, 청소년 사업은
+대상이 어린이·청소년·학생·학부모이라는 이유만으로 포함하지 않는다. 다음 중 하나가 기사 본문에서
+확인될 때만 교육 관련 기사로 포함한다:
+
+1. 인천광역시교육청, 교육지원청, 직속기관이 공동 주최·주관·협약·지원 기관으로 명시된다.
+2. 인천 관내 학교가 공식 참여 기관, 운영 주체, 협력 기관 또는 직접 영향을 받는 기관으로 명시된다.
+3. 특정 인천 학교의 운영, 안전, 시설, 교육과정 또는 학생 보호에 직접 영향을 미치는 정책·사건이다.
+
+단순 참가 대상, 수혜 대상 또는 홍보 문구에 `학생`, `학부모`, `어린이`, `청소년`, `교육`, `체험`이
+등장하는 것은 연계 근거가 아니다. 연계가 본문에서 확인되지 않으면 `제외 또는 참고`에 사유를 남긴다.
+
 ## Inclusion Test
 
 Include the item when at least one is true:
@@ -93,6 +106,7 @@ Include the item when at least one is true:
 - 행정구역상 인천 관내 학교가 핵심 주체다 (정식 명칭이 없어도 기사 내용상 인천 관내 학교로 명시된 경우 포함).
 - 인천 학교 재학 중인 학생 또는 그 학부모가 사건·정책의 핵심 당사자다.
 - 인천시의회에서 교육청 또는 교육 관련 안건·발언이 핵심 내용이다.
+- 시청·군청·구청 주도 기사라면 교육청 계열 기관 또는 인천 관내 학교의 공식 연계가 본문에서 확인된다.
 
 Exclude the item when all are true:
 

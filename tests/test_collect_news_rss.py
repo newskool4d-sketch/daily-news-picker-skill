@@ -28,6 +28,25 @@ class RelevanceRulesTest(unittest.TestCase):
         self.assert_status("서해구 학교 보건교사 응급대응 교육", "likely_relevant")
         self.assert_status("검단구 학생, 발명대회 수상", "likely_relevant")
 
+    def test_local_government_event_requires_education_office_or_school_link(self):
+        standalone = NEWS.classify_title_relevance(
+            "인천 미추홀구, 초등학생 체력왕 선발"
+        )
+        self.assertEqual("likely_irrelevant", standalone["status"])
+        self.assertIn(
+            "local_government_without_education_link", standalone["reasons"]
+        )
+        self.assert_status(
+            "학생·학부모가 함께 가꾼 지역 환경… 서해구, 모범 자원봉사자 41명 표창",
+            "likely_irrelevant",
+        )
+        self.assert_status(
+            "미추홀구, 인천교육청과 학교 체력증진 협약", "likely_relevant"
+        )
+        self.assert_status(
+            "서해구, 신현초등학교와 학생안전 체험행사 운영", "likely_relevant"
+        )
+
     def test_verified_locality_candidates(self):
         self.assert_status("송도 고교생, 국제과학대회 우승", "likely_relevant")
         self.assert_status("청라 학생 선행 미담", "likely_relevant")
@@ -77,15 +96,49 @@ class RelevanceRulesTest(unittest.TestCase):
         ):
             self.assertIn(query, queries)
 
-    def test_runner_preserves_briefing_then_candidate_pool_flow(self):
+    def test_runner_keeps_approved_briefing_then_candidate_publication_order(self):
         runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
-        self.assertIn("ingest --briefing $markdownPath", runner)
+        briefing_call = '@($organizerScript, "ingest", "--briefing", $markdownPath)'
+        candidate_call = '@($organizerScript, "ingest", "--json", $ingestJsonPath)'
+        self.assertIn(briefing_call, runner)
         self.assertIn("Copy-Item -Path $collectedJsonPath -Destination $persistedCollectedJsonPath", runner)
-        self.assertIn("ingest --json $ingestJsonPath", runner)
+        self.assertIn(candidate_call, runner)
         self.assertLess(
-            runner.index("ingest --briefing $markdownPath"),
-            runner.index("ingest --json $ingestJsonPath"),
+            runner.index(briefing_call),
+            runner.index(candidate_call),
         )
+
+    def test_runner_surfaces_downstream_native_command_failures(self):
+        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
+        self.assertIn("$nativeExitCode = $LASTEXITCODE", runner)
+        self.assertIn("if ($nativeExitCode -ne 0)", runner)
+        self.assertIn('STATUS: PARTIAL [DOWNSTREAM]', runner)
+        self.assertIn('Invoke-LoggedNativeCommand -Step "정적 사이트 게시"', runner)
+
+    def test_collector_candidates_are_private_until_body_verification(self):
+        self.assertFalse(NEWS.DEFAULT_PUBLICATION_ELIGIBLE)
+        collector = (ROOT / "scripts" / "collect_news_rss.py").read_text(encoding="utf-8")
+        self.assertIn('"publication_eligible": DEFAULT_PUBLICATION_ELIGIBLE', collector)
+
+    def test_runner_requires_downstream_contract_for_site_output(self):
+        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
+        self.assertIn("$downstreamRequired", runner)
+        self.assertIn("하류 구성요소 없음", runner)
+        self.assertIn('archive\\{0}.html', runner)
+        self.assertIn("exit 1", runner)
+
+    def test_runner_promotes_only_structured_body_verification(self):
+        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
+        self.assertIn("DAILY_NEWS_VERIFIED_CANDIDATES", runner)
+        self.assertIn("promote_verified_candidates.py", runner)
+        self.assertIn("verified_collected_articles.json", runner)
+        self.assertIn("verification_basis", runner)
+        self.assertIn('STATUS: PARTIAL [VERIFICATION]', runner)
+
+    def test_runner_defaults_to_gpt_5_6_sol(self):
+        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
+        self.assertIn('[string]$Model = "gpt-5.6-sol"', runner)
+        self.assertNotIn('[string]$Model = "gpt-5.5"', runner)
 
     def test_runner_timeout_cleanup_cannot_block_codex_fallback(self):
         runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")

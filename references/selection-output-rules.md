@@ -26,17 +26,33 @@ Use the article body, not just the headline, to confirm the relationship. Studen
 
 Apply incident relevance article by article. Do not block an event name globally: exclude a regional commercial or disaster article that has no education relationship, while keeping separate coverage about education-office response, school evacuation or shelter use, student safety, or school-operation impact.
 
-The collector's `relevance_hint` is triage metadata only:
+### Local Government Partnership Gate
+
+For an article led by 인천시청, a 군청·구청, or a local-government facility/foundation, require a direct
+institutional link in the article body: an Incheon education office/affiliated institution is a named partner,
+an Incheon school is an official participant or operator, or the action directly affects school operations,
+safety, facilities, curriculum, or student protection. A youth/child/student/parent audience by itself is not
+an education-office relationship. Exclude standalone local-government events, welfare, care, awards,
+scholarships, experiences, and youth-facility programs when that link is not confirmed.
+
+The collector's `relevance_hint` is triage metadata only. Collector candidates also carry
+`publication_eligible`, which is `false` until article-body verification explicitly promotes the item:
 
 - `likely_relevant`: the title has an Incheon education-office marker, or both Incheon-location and education-subject evidence.
 - `likely_irrelevant`: the title has an Incheon location or clear commercial context but no education subject. Exclude unless the full article proves a direct education relationship.
+- `likely_irrelevant` also covers a local-government-led title that mentions students or education but has no title-level education-office or school link. The article body may override this only when the required institutional link is verified.
 - `needs_review`: title evidence is incomplete; verify exact school names, addresses, and article-body context before deciding.
+
+Neither `likely_relevant` nor `needs_review` grants public publication permission by itself. Preserve all
+collector candidates for audit, but publish only explicit briefing items or candidates with
+`publication_eligible: true` and a recorded verification basis.
 ## Selection
 
 - Keep items tied to policy, budget, projects, student safety, education activity, audits, organization operation, facilities, hiring, awards, agreements, complaints, incidents, or accidents.
 - For the daily `주요 언론보도 현황`, keep all verified relevant press articles inside the requested period. There is no default cap such as 5 items.
 - Ranking controls order, not inclusion. Lower-priority but relevant articles stay in `주요 언론보도`.
 - Routine but direct education-office coverage is still coverage: program operation, event 개최, participant recruitment, library programs, affiliated-institution activities, school-level stories tied to 인천교육청 policy, and education-support-office stories should be kept unless clearly irrelevant.
+- Exclude standalone city/county/district-office activities even when their audience is children, youth, students, or parents, unless the Local Government Partnership Gate is satisfied.
 - Exclude generic education news unless an Incheon education-office entity directly appears.
 - Exclude stale articles outside the requested period unless needed as background.
 - Exclude low-information reposts, clickbait, automated content farms, and duplicates.
@@ -47,6 +63,17 @@ The collector's `relevance_hint` is triage metadata only:
 - Low-count guard: if the daily count seems unusually low for a normal business-day coverage-status report, run the monitored-outlet domain checks and official verification checks before writing `확인된 유의미 기사 없음` or producing a sparse report.
 
 ## Output
+
+The downstream Vercel digest keeps the previously approved publication structure. Ingest the verified briefing
+first and the preserved candidate JSON second; publish the briefing items plus candidates whose
+`publication_eligible` is explicitly `true` after body verification. Triage status alone never grants publication
+permission. This filtering must not replace or redesign the existing same-story grouping, three-section layout,
+or responsive grid.
+
+When the scheduled runner is used, report-body candidates promoted from the collector must also be listed in the
+runner's `DAILY_NEWS_VERIFIED_CANDIDATES` JSON marker with the exact `original_url`, `verified: true`,
+`publication_eligible: true`, and a concrete `verification_basis`. The runner strips this internal marker before
+public output and preserves the raw collector JSON separately from the verified derived JSON.
 
 Default structure:
 

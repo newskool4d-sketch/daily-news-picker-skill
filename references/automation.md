@@ -6,6 +6,9 @@
 - Daily output folder: `인천교육청 언론보도 현황(YYYYMMDD)`
 - Markdown file: `인천교육청 언론보도 현황.md`
 - HTML file: `인천교육청 언론보도 현황.html`
+- Raw candidate JSON: `collected_articles.json` (수집 원본, 항상 보존)
+- Verified candidate JSON: `verified_collected_articles.json` (본문 검증 표식으로 승격된 파생본)
+- Verification manifest: `verification-manifest.json` (승격 근거·무시 항목 감사 기록)
 - Run log: `run.log`
 - Prompt snapshot: `prompt.txt`
 
@@ -15,6 +18,8 @@
 - Task registration: `scripts/register-daily-news-picker-task.ps1`
 - RSS collector: `scripts/collect_news_rss.py` — Google News RSS 주 엔진 + 네이버 뉴스 API 보강의 결정론적 1차 수집기 (2026-07-17 실측 채택).
   러너가 Codex 실행 전에 자동 호출하며, 수동 단독 실행도 가능 (`--start/--end/--out-dir`).
+- Verification promotion: `scripts/promote_verified_candidates.py` — Codex의 본문 검증 표식을
+  검증 후보 파생 JSON으로 변환하고, 원본 후보 풀은 변경하지 않는다.
 
 ## Execution Model
 
@@ -34,10 +39,15 @@
    in every run during 2026-07-14~17 and caused three consecutive daily failures once the read-only sandbox landed.
 7. If Codex fails or writes an empty report, the runner removes partial `md/html` outputs and records a categorized failure summary.
 8. It converts the validated Markdown into an HTML file.
-9. After SUCCEEDED, it feeds the downstream organizer (`~/.codex/skills/edu-news-organizer/scripts/newsdb.py`)
-   non-fatally: briefing md first (so the `--selected` filter works), then the candidate-pool JSON, then same-story
-   grouping, then a premium HTML digest (`교육뉴스 다이제스트.html`, Incheon Education CI design) saved next to the
-   briefing. Output goes to `organizer-ingest.log`; failures are logged but never fail the run.
+9. Before downstream ingest, the runner reads the Codex `DAILY_NEWS_VERIFIED_CANDIDATES` marker. Each entry must
+   carry an exact candidate URL, `verified: true`, `publication_eligible: true`, and a concrete body-evidence
+   `verification_basis`. The runner writes `verified_collected_articles.json`, strips the internal marker from the
+   public Markdown, and keeps the raw `collected_articles.json` unchanged. Missing or malformed markers fail closed;
+   candidates remain private and the run records `PARTIAL [VERIFICATION]` when the marker cannot be processed.
+10. It feeds the downstream organizer (`~/.codex/skills/edu-news-organizer/scripts/newsdb.py`): briefing md first,
+   then the verified candidate JSON (or the raw private pool when no promotion occurred), then same-story grouping,
+   then a premium HTML digest (`교육뉴스 다이제스트.html`, Incheon Education CI design) saved next to the briefing.
+   Output goes to `organizer-ingest.log`; required downstream or verification failures are surfaced as non-zero.
 
 ## Safety Notes
 
