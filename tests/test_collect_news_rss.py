@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 import importlib.util
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -144,6 +147,87 @@ class RelevanceRulesTest(unittest.TestCase):
         runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
         self.assertIn("$collectorProcess.WaitForExit(5000)", runner)
         self.assertIn("수집기 임시 로그 읽기 실패(비치명)", runner)
+
+    def test_runner_repairs_categorized_report_into_required_main_section(self):
+        runner_path = ROOT / "scripts" / "run-daily-news-picker.ps1"
+        runner = runner_path.read_text(encoding="utf-8")
+        self.assertIn("[string]$ValidateReportPath", runner)
+        pwsh = shutil.which("pwsh")
+        self.assertIsNotNone(pwsh, "PowerShell 7 is required for runner validation")
+        report = """# 인천교육청 언론보도 현황
+
+- 보고일: 2026. 8. 21.(금)
+- 점검 범위: 2026-08-20 05:00 ~ 2026-08-21 05:00 (Asia/Seoul)
+
+## 주요 정책·현안
+
+■ 정책 기사 - 테스트매체
+https://example.com/policy
+
+## 직속기관·도서관·교육문화
+
+■ 기관 기사 - 테스트매체
+https://example.com/institution
+
+## 검증 메모
+
+- 점검 범위 확인 완료
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "report.md"
+            html_path = Path(temp_dir) / "report.html"
+            report_path.write_text(report, encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    pwsh,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(runner_path),
+                    "-BasePath",
+                    temp_dir,
+                    "-ReportDate",
+                    "2026-08-21",
+                    "-ValidateReportPath",
+                    str(report_path),
+                    "-ValidationHtmlOutputPath",
+                    str(html_path),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr or completed.stdout)
+            repaired = report_path.read_text(encoding="utf-8")
+            self.assertIn("## 주요 언론보도", repaired)
+            self.assertIn("### 주요 정책·현안", repaired)
+            self.assertIn("### 직속기관·도서관·교육문화", repaired)
+            self.assertIn("## 검증 메모", repaired)
+            self.assertTrue(html_path.is_file())
+            rendered = html_path.read_text(encoding="utf-8")
+            self.assertIn("<!doctype html>", rendered)
+            self.assertIn("주요 언론보도", rendered)
+
+    def test_runner_prompt_requires_exact_main_section_hierarchy(self):
+        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
+        self.assertIn('"## 주요 언론보도" 헤더를 정확히 한 번', runner)
+        self.assertIn('분류 제목을 사용할 경우에는 그 아래 "###" 헤더', runner)
+
+    def test_runner_retry_includes_failed_validation_fields(self):
+        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
+        self.assertIn("$lastValidationFailures", runner)
+        self.assertIn("이전 출력 검증 실패 항목:", runner)
+        self.assertIn("$retryPrompt", runner)
+
+    def test_runner_preserves_successful_collector_json_on_report_validation_failure(self):
+        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
+        self.assertIn("수집 후보 JSON 보존:", runner)
+        self.assertIn("$collectorUsed -and (Test-NonEmptyFile -Path $persistedCollectedJsonPath)", runner)
+        self.assertIn("-ValidationFailures $lastValidationFailures", runner)
 
 
 class OriginalUrlResolutionTest(unittest.TestCase):

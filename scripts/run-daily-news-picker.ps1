@@ -11,6 +11,8 @@
     [int]$CodexTimeoutSeconds = 1800,
     [int]$MaxAttempts = 2,
     [datetime]$ReportDate = (Get-Date).Date,
+    [string]$ValidateReportPath,
+    [string]$ValidationHtmlOutputPath,
     [switch]$DangerouslyBypassApprovalsAndSandbox,
     [switch]$Force,
     [switch]$DryRun
@@ -472,24 +474,93 @@ function Repair-MarkdownReport {
     }
 
     $normalized = [regex]::Replace($normalized, '(?m)^(핵심 요약|주요 언론보도|제외 또는 참고)\s*$', '## $1')
+
+    if (($normalized -notmatch '(?m)^##\s+주요 언론보도\s*$') -and
+        ($normalized -match '(?m)^■\s+.+\s+-\s+.+$')) {
+        $lines = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in [regex]::Split($normalized, "\r?\n")) {
+            [void]$lines.Add($line)
+        }
+
+        $firstArticleIndex = -1
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            if ($lines[$index] -match '^■\s+.+\s+-\s+.+$') {
+                $firstArticleIndex = $index
+                break
+            }
+        }
+
+        if ($firstArticleIndex -ge 0) {
+            $reservedHeadings = @('핵심 요약', '주요 언론보도', '제외 또는 참고', '검증 메모')
+            $firstCategoryHeadingIndex = -1
+            for ($index = $firstArticleIndex - 1; $index -ge 0; $index--) {
+                if ($lines[$index] -match '^##\s+(.+?)\s*$') {
+                    $heading = $Matches[1].Trim()
+                    if ($heading -notin $reservedHeadings) {
+                        $firstCategoryHeadingIndex = $index
+                        break
+                    }
+                }
+            }
+
+            $insertAt = if ($firstCategoryHeadingIndex -ge 0) { $firstCategoryHeadingIndex } else { $firstArticleIndex }
+            $lines.Insert($insertAt, '')
+            $lines.Insert($insertAt, '## 주요 언론보도')
+
+            $insideMainSection = $false
+            for ($index = 0; $index -lt $lines.Count; $index++) {
+                if ($lines[$index] -match '^##\s+주요 언론보도\s*$') {
+                    $insideMainSection = $true
+                    continue
+                }
+                if ($insideMainSection -and $lines[$index] -match '^##\s+(.+?)\s*$') {
+                    $heading = $Matches[1].Trim()
+                    if ($heading -in @('핵심 요약', '제외 또는 참고', '검증 메모')) {
+                        $insideMainSection = $false
+                    } else {
+                        $lines[$index] = "### $heading"
+                    }
+                }
+            }
+
+            $normalized = [string]::Join([Environment]::NewLine, $lines)
+        }
+    }
     [System.IO.File]::WriteAllText($Path, $normalized + [Environment]::NewLine, $script:Utf8NoBom)
+}
+
+function Get-MarkdownReportValidationFailures {
+    param([string]$Path)
+
+    if (-not (Test-NonEmptyFile -Path $Path)) {
+        return @('non_empty_file')
+    }
+
+    $content = Get-Content -Path $Path -Raw -Encoding UTF8
+    $trimmed = $content.TrimStart()
+    $failures = [System.Collections.Generic.List[string]]::new()
+    if (-not ($trimmed.StartsWith("# 인천교육청 언론보도 현황") -or ($trimmed -match '^20\d{2}\.\s*\d{1,2}\.\s*\d{1,2}\.'))) {
+        [void]$failures.Add('title')
+    }
+    if ($content -notmatch '(?m)^(?:##\s*)?주요 언론보도\s*$') {
+        [void]$failures.Add('main_section')
+    }
+    if (-not (($content -match '(?m)^■\s+.+\s+-\s+.+$') -or ($content -match '확인된 유의미 기사 없음'))) {
+        [void]$failures.Add('article_list')
+    }
+    if ($content -notmatch [regex]::Escape($windowStartDisplay)) {
+        [void]$failures.Add('window_start')
+    }
+    if ($content -notmatch [regex]::Escape($windowEndDisplay)) {
+        [void]$failures.Add('window_end')
+    }
+    return $failures.ToArray()
 }
 
 function Test-IsMarkdownReport {
     param([string]$Path)
 
-    if (-not (Test-NonEmptyFile -Path $Path)) {
-        return $false
-    }
-
-    $content = Get-Content -Path $Path -Raw -Encoding UTF8
-    $trimmed = $content.TrimStart()
-    $hasTitle = $trimmed.StartsWith("# 인천교육청 언론보도 현황") -or ($trimmed -match '^20\d{2}\.\s*\d{1,2}\.\s*\d{1,2}\.')
-    $hasMainSection = $content -match '(?m)^(?:##\s*)?주요 언론보도\s*$'
-    $hasArticleList = ($content -match '(?m)^■\s+.+\s+-\s+.+$') -or ($content -match '확인된 유의미 기사 없음')
-    $hasExpectedWindowStart = $content -match [regex]::Escape($windowStartDisplay)
-    $hasExpectedWindowEnd = $content -match [regex]::Escape($windowEndDisplay)
-    return ($hasTitle -and $hasMainSection -and $hasArticleList -and $hasExpectedWindowStart -and $hasExpectedWindowEnd)
+    return (@(Get-MarkdownReportValidationFailures -Path $Path).Count -eq 0)
 }
 
 function Get-GeneratedReportMarkdown {
@@ -574,7 +645,8 @@ function Get-RunFailureSummary {
     param(
         [string]$Category,
         [int]$ExitCode,
-        [string]$StdErrPath
+        [string]$StdErrPath,
+        [string[]]$ValidationFailures = @()
     )
 
     $detail = switch ($Category) {
@@ -583,6 +655,10 @@ function Get-RunFailureSummary {
         "timeout" { "Codex 실행 시간 제한 초과" }
         "codex_exit" { "Codex 비정상 종료" }
         default { "결과물 검증 실패" }
+    }
+
+    if (($Category -eq "output_validation") -and $ValidationFailures.Count -gt 0) {
+        return ("{0} (exit code: {1}) | 실패 항목: {2}" -f $detail, $ExitCode, ($ValidationFailures -join ", "))
     }
 
     $lastErrorLine = ""
@@ -606,6 +682,35 @@ $windowStart = (Get-PreviousBusinessDay -Date $reportDate).Date.Add($CollectionT
 $windowEnd = $reportDate.Date.Add($CollectionTime)
 $windowStartDisplay = $windowStart.ToString("yyyy-MM-dd HH:mm")
 $windowEndDisplay = $windowEnd.ToString("yyyy-MM-dd HH:mm")
+
+if (-not [string]::IsNullOrWhiteSpace($ValidateReportPath)) {
+    if (-not (Test-Path -LiteralPath $ValidateReportPath)) {
+        throw "검증할 Markdown 파일이 없습니다: $ValidateReportPath"
+    }
+    Repair-MarkdownReport -Path $ValidateReportPath
+    $validationFailures = @(Get-MarkdownReportValidationFailures -Path $ValidateReportPath)
+    if ($validationFailures.Count -gt 0) {
+        Write-Output ("REPORT_VALIDATION: FAIL [{0}]" -f ($validationFailures -join ','))
+        exit 2
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ValidationHtmlOutputPath)) {
+        $validationHtmlParent = Split-Path -Parent $ValidationHtmlOutputPath
+        if ($validationHtmlParent -and -not (Test-Path -LiteralPath $validationHtmlParent)) {
+            New-Item -ItemType Directory -Force -Path $validationHtmlParent | Out-Null
+        }
+        Convert-MarkdownToHtmlDocument `
+            -MarkdownPath $ValidateReportPath `
+            -HtmlPath $ValidationHtmlOutputPath `
+            -Title ("인천교육청 언론보도 현황({0})" -f $reportDateStamp)
+        if (-not (Test-NonEmptyFile -Path $ValidationHtmlOutputPath)) {
+            throw "검증된 Markdown의 HTML 변환 결과가 비어 있습니다: $ValidationHtmlOutputPath"
+        }
+        Write-Output ("REPORT_HTML: {0}" -f $ValidationHtmlOutputPath)
+    }
+    Write-Output "REPORT_VALIDATION: PASS"
+    exit 0
+}
+
 $folderName = "인천교육청 언론보도 현황($reportDateStamp)"
 $reportDir = Join-Path $BasePath $folderName
 $markdownPath = Join-Path $reportDir "인천교육청 언론보도 현황.md"
@@ -673,6 +778,8 @@ Apply these rules:
 - Ranking controls output order only. Do not omit relevant lower-priority routine items, affiliated-institution items, library items, school-level items, or local issue articles solely because they are not top priority.
 - If several outlets carry materially the same story, keep one representative external media article for that same event, but do not merge separate issues or institutions.
 - In the main list, use this sharing format for each item: `■ article title - outlet` followed by the URL on the next line.
+- 보고서에는 "## 주요 언론보도" 헤더를 정확히 한 번 사용한다.
+- 세부 분류 제목을 사용할 경우에는 그 아래 "###" 헤더로만 작성한다.
 - If no meaningful article is found, still produce the full report structure and say `확인된 유의미 기사 없음`
 - Do not ask follow-up questions
 - Do not explain the workflow
@@ -815,6 +922,7 @@ $process = $null
 $timedOut = $false
 $verificationFailed = $false
 $verifiedCandidateAvailable = $false
+$lastValidationFailures = @()
 
 Write-RunLog -Path $logPath -Message "STATUS: STARTED"
 Write-RunLog -Path $logPath -Message ("설정: model={0}, bypass={1}, output={2}, codexWorkDir={3}, timeoutSeconds={4}" -f $Model, $DangerouslyBypassApprovalsAndSandbox.IsPresent, $reportDir, $codexWorkDir, $CodexTimeoutSeconds)
@@ -889,13 +997,26 @@ try {
             Repair-MarkdownReport -Path $markdownPath
         }
 
-        if (($process.ExitCode -eq 0) -and (Test-IsMarkdownReport -Path $markdownPath)) {
+        $lastValidationFailures = @(Get-MarkdownReportValidationFailures -Path $markdownPath)
+        if (($process.ExitCode -eq 0) -and ($lastValidationFailures.Count -eq 0)) {
             $reportReady = $true
             break
         }
 
         if ($attempt -lt $MaxAttempts) {
-            $retryReason = if ($process.ExitCode -ne 0) { "exit code $($process.ExitCode)" } else { "빈 응답 또는 보고서 형식 불충족" }
+            $retryReason = if ($process.ExitCode -ne 0) {
+                "exit code $($process.ExitCode)"
+            } else {
+                "보고서 검증 실패: $($lastValidationFailures -join ', ')"
+            }
+            if (($process.ExitCode -eq 0) -and ($lastValidationFailures.Count -gt 0)) {
+                $retryPrompt = $prompt + @"
+
+이전 출력 검증 실패 항목: $($lastValidationFailures -join ', ')
+위 항목을 모두 수정한 전체 보고서를 다시 반환하세요. 특히 요구된 제목과 점검 범위를 정확히 유지하세요.
+"@
+                [System.IO.File]::WriteAllText($promptPath, $retryPrompt, $script:Utf8NoBom)
+            }
             Write-RunLog -Path $logPath -Message ("시도 {0} 실패({1}). 부분 산출물 제거 후 재시도합니다." -f $attempt, $retryReason)
             Remove-IfExists -Path $markdownPath
             Remove-IfExists -Path $htmlPath
@@ -1048,11 +1169,15 @@ try {
 catch {
     $exitCode = if ($timedOut) { 124 } elseif ($process) { $process.ExitCode } else { -1 }
     $category = if ($timedOut) { "timeout" } else { Get-RunFailureCategory -ExitCode $exitCode -StdErrPath $stderrPath }
-    $summary = Get-RunFailureSummary -Category $category -ExitCode $exitCode -StdErrPath $stderrPath
+    $summary = Get-RunFailureSummary -Category $category -ExitCode $exitCode -StdErrPath $stderrPath -ValidationFailures $lastValidationFailures
 
     Remove-IfExists -Path $markdownPath
     Remove-IfExists -Path $htmlPath
-    Remove-IfExists -Path $persistedCollectedJsonPath
+    if ($collectorUsed -and (Test-NonEmptyFile -Path $persistedCollectedJsonPath)) {
+        Write-RunLog -Path $logPath -Message ("수집 후보 JSON 보존: {0}" -f $persistedCollectedJsonPath)
+    } else {
+        Remove-IfExists -Path $persistedCollectedJsonPath
+    }
     Remove-IfExists -Path $persistedVerifiedCollectedJsonPath
     Remove-IfExists -Path $verificationManifestPath
     Remove-IfExists -Path $verificationLogPath
