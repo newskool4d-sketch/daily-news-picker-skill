@@ -1,5 +1,33 @@
 # Automation Structure
 
+## Engine: Codex or Claude
+
+This automation supports two interchangeable LLM engines for the collection/verification/report-writing step.
+Everything else in the pipeline (holiday calendar, RSS collector, Markdown validation/repair, candidate promotion,
+downstream DB ingest, site publish) is identical between the two — only the runner script and the CLI invoked
+inside it differ.
+
+| | Codex (original) | Claude (2026-08-21) |
+|---|---|---|
+| Runner script | `scripts/run-daily-news-picker.ps1` | `scripts/run-daily-news-picker-claude.ps1` |
+| CLI invoked | `codex exec` (`-m gpt-5.6-sol`, `-s read-only`) | `claude -p` (`--model sonnet`, `--allowedTools "Read Glob Grep WebSearch WebFetch"`, `--permission-mode bypassPermissions`) |
+| Write access during the run | sandboxed via `-s read-only` | structurally impossible — the allowed-tools list has no write/edit/bash tool |
+| Unattended auth | `codex` session/API credentials | `claude.exe` at `%CLAUDE_CODEX_CLAUDE_BIN%` (falls back to `claude` on PATH), verified headless via `scripts/test-claude-headless-auth.ps1` |
+
+**Currently registered in Task Scheduler**: the Claude runner, `\DailyNewsPicker\IncheonEducationNews`, daily at 09:00
+(changed from 05:00 on 2026-08-21 together with the engine switch).
+
+**Why the switch**: the Codex-engine run on 2026-08-21 06:07 recorded `STATUS: FAILED [OUTPUT_VALIDATION]` —
+not a network/MCP failure, but the model repeatedly using ad-hoc `##`-level category headers instead of the
+single required `## 주요 언론보도` header, exhausting the runner's retry budget. The Claude engine run the same day
+produced a valid report on the first attempt with broader outlet diversity (12+ outlets vs. 1 in the last Codex
+attempt), after a similar preamble-text quirk (`claude -p` prefixing the report with a stray "모든 검증이 끝났습니다"
+sentence) was fixed by tightening the prompt and adding a title-deduplication step to `Repair-MarkdownReport`.
+
+**To roll back to Codex**: re-run `scripts/register-daily-news-picker-task.ps1` with
+`-ScriptPath scripts\run-daily-news-picker.ps1` and `-StartTime 05:00`. Nothing about the Codex runner was
+changed or removed.
+
 ## Default Paths
 
 - Base output folder: set explicitly with `-BasePath` or the `DAILY_NEWS_OUTPUT_DIR` environment variable. If neither is set, the task registration script uses `%USERPROFILE%\Documents\Codex\DailyNewsPicker`.
@@ -57,17 +85,27 @@
 
 ## Scheduler
 
-Use Windows Task Scheduler to call the runner every day at 5:00 AM; the runner skips weekends and Korean public holidays.
-Weekend and public holiday suppression is handled inside the runner script; skipped-day articles are included in the next business-day 5:00 AM collection window.
-Register the task with PowerShell 7 (`pwsh`) when available. Windows PowerShell 5 may misread UTF-8 Korean strings in this script and fail before execution.
+Use Windows Task Scheduler to call a runner every day; the runner skips weekends and Korean public holidays.
+Weekend and public holiday suppression is handled inside the runner script; skipped-day articles are included in
+the next business-day collection window. Register the task with PowerShell 7 (`pwsh`) when available. Windows
+PowerShell 5 may misread UTF-8 Korean strings in this script and fail before execution.
 
-Example registration command:
+`\DailyNewsPicker\IncheonEducationNews` currently runs `run-daily-news-picker-claude.ps1` at 09:00 daily — see
+"Engine: Codex or Claude" above for why and how to switch back.
+
+Example registration command (Claude engine, 09:00):
+
+```powershell
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codex\skills\daily-news-picker\scripts\register-daily-news-picker-task.ps1" -ScriptPath "$env:USERPROFILE\.codex\skills\daily-news-picker\scripts\run-daily-news-picker-claude.ps1" -BasePath "$env:USERPROFILE\Documents\Codex\DailyNewsPicker" -StartTime "09:00"
+```
+
+Example registration command (Codex engine, original, 05:00):
 
 ```powershell
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codex\skills\daily-news-picker\scripts\register-daily-news-picker-task.ps1" -BasePath "$env:USERPROFILE\Documents\Codex\DailyNewsPicker"
 ```
 
-If unattended execution still needs the broader Codex flag, register with:
+If unattended execution with the Codex engine still needs the broader Codex flag, register with:
 
 ```powershell
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codex\skills\daily-news-picker\scripts\register-daily-news-picker-task.ps1" -BasePath "$env:USERPROFILE\Documents\Codex\DailyNewsPicker" -DangerouslyBypassApprovalsAndSandbox
