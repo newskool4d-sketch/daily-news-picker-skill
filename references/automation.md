@@ -28,6 +28,31 @@ sentence) was fixed by tightening the prompt and adding a title-deduplication st
 `-ScriptPath scripts\run-daily-news-picker.ps1` and `-StartTime 05:00`. Nothing about the Codex runner was
 changed or removed.
 
+## Manual Re-run / Backfill (Claude engine)
+
+When a scheduled run fails and a date needs to be backfilled, do NOT pass `-EnablePublicPush` on the
+command line — the `[bool]` parameter fails string-to-bool binding under `pwsh -File` when invoked from
+a non-PowerShell shell (measured twice on 2026-08-27: both `-EnablePublicPush:$false` and
+`-EnablePublicPush:1` die with "Cannot process argument transformation"). The Task Scheduler action's
+`-EnablePublicPush:True` works only in that native invocation context; keep the two paths separate.
+
+Canonical manual backfill command (site push enabled via env var — verified 2026-08-27):
+
+```powershell
+$env:EDU_NEWS_SITE_PUSH = "1"
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.codex\skills\daily-news-picker\scripts\run-daily-news-picker-claude.ps1" -BasePath "$env:USERPROFILE\Documents\Codex\DailyNewsPicker" -WorkingRoot "$env:USERPROFILE" -CollectionTime "09:00" -ReportDate "YYYY-MM-DD" -SiteDir "$env:USERPROFILE\Documents\Codex\EduNewsSite" -Force
+```
+
+Omit `EDU_NEWS_SITE_PUSH` (or set `"0"`) to rebuild the site locally without pushing. The backfilled
+date's check window is derived from `-ReportDate` and `-CollectionTime` exactly as in a scheduled run
+(previous business day 09:00 → report date 09:00), so late articles are excluded identically.
+
+Known validation quirk (fixed 2026-08-27): the report validator requires the exact literal
+`YYYY-MM-DD HH:mm` window strings in the body. The 2026-08-26 scheduled run failed twice because the
+model paraphrased the window ("당일 오전 9시"). `Repair-MarkdownReport` now injects the canonical
+`점검 창: <start> ~ <end> (Asia/Seoul)` line under the title whenever either literal is missing, making
+the check deterministic.
+
 ## Default Paths
 
 - Base output folder: set explicitly with `-BasePath` or the `DAILY_NEWS_OUTPUT_DIR` environment variable. If neither is set, the task registration script uses `%USERPROFILE%\Documents\Codex\DailyNewsPicker`.

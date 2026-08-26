@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BasePath = $env:DAILY_NEWS_OUTPUT_DIR,
     [string]$WorkingRoot = $env:USERPROFILE,
     [string]$ClaudeCommand = $(if ($env:CLAUDE_CODEX_CLAUDE_BIN) { $env:CLAUDE_CODEX_CLAUDE_BIN } else { "claude" }),
@@ -483,6 +483,22 @@ function Repair-MarkdownReport {
 
     if (-not $normalized.TrimStart().StartsWith("# 인천교육청 언론보도 현황")) {
         $normalized = "# 인천교육청 언론보도 현황`r`n`r`n$normalized"
+    }
+
+    # 점검 창 리터럴 보정: 검증기는 본문에 windowStart/windowEnd의 정확한 문자열이 있는지 검사하는데,
+    # 모델이 "당일 오전 9시" 같은 변형 표기를 쓰면 내용이 정상이어도 실패한다(2026-08-26 실측 —
+    # 2회 시도 모두 window 표기 탈락으로 run 전체 FAILED). 점검 창은 러너가 정하는 값이므로
+    # 리터럴이 없으면 제목 바로 아래에 정본 표기 줄을 삽입해 검증을 결정적으로 만든다.
+    if (($normalized -notmatch [regex]::Escape($windowStartDisplay)) -or
+        ($normalized -notmatch [regex]::Escape($windowEndDisplay))) {
+        $windowLine = "점검 창: $windowStartDisplay ~ $windowEndDisplay (Asia/Seoul)"
+        $normalized = [regex]::Replace(
+            $normalized,
+            '(?m)^(#\s*인천교육청 언론보도 현황\s*)$',
+            ('$1' + "`r`n`r`n" + $windowLine),
+            [System.Text.RegularExpressions.RegexOptions]::None,
+            [timespan]::FromSeconds(5)
+        )
     }
 
     $normalized = [regex]::Replace($normalized, '(?m)^(핵심 요약|주요 언론보도|제외 또는 참고)\s*$', '## $1')
