@@ -485,17 +485,28 @@ function Repair-MarkdownReport {
         $normalized = "# 인천교육청 언론보도 현황`r`n`r`n$normalized"
     }
 
-    # 점검 창 리터럴 보정: 검증기는 본문에 windowStart/windowEnd의 정확한 문자열이 있는지 검사하는데,
-    # 모델이 "당일 오전 9시" 같은 변형 표기를 쓰면 내용이 정상이어도 실패한다(2026-08-26 실측 —
-    # 2회 시도 모두 window 표기 탈락으로 run 전체 FAILED). 점검 창은 러너가 정하는 값이므로
-    # 리터럴이 없으면 제목 바로 아래에 정본 표기 줄을 삽입해 검증을 결정적으로 만든다.
+    # 러너 소유 메타데이터 보정(보고일·점검 창): 하류는 모델의 정확한 표기에 의존한다 —
+    #  - newsdb.py 인제스트는 `YYYY. M. D.(요일) … 주요 언론보도 현황입니다` 또는 `보고일: YYYY-MM-DD`
+    #    형식의 날짜 헤더가 없으면 exit 2로 중단(2026-09-21 실측: 모델이 `- 기준일:`로 써서 하류 전체 실패)
+    #  - 검증기는 windowStart/windowEnd의 정확한 문자열을 요구(2026-08-26 실측: "당일 오전 9시"로 써서 FAILED)
+    # 두 값 모두 러너가 정하는 값이므로, 인식 형식이 없으면 제목 바로 아래에 정본 줄을 한 번에 삽입해
+    # 하류를 결정적으로 만든다. 모델이 이미 올바르게 썼으면 아무것도 넣지 않는다.
+    $headerLines = @()
+    $dateHeaderPresent = $normalized -match ('(?m)^[ \t]*(?:20\d{2}\.[ \t]*\d{1,2}\.[ \t]*\d{1,2}\.[ \t]*\(.\).*주요 언론보도 현황입니다' +
+        '|(?:[-*][ \t]*)?보고일[ \t]*:[ \t]*20\d{2}[ \t]*[-./][ \t]*\d{1,2}[ \t]*[-./][ \t]*\d{1,2})')
+    if (-not $dateHeaderPresent) {
+        $headerLines += "- 보고일: $reportDateDisplay"
+    }
     if (($normalized -notmatch [regex]::Escape($windowStartDisplay)) -or
         ($normalized -notmatch [regex]::Escape($windowEndDisplay))) {
-        $windowLine = "점검 창: $windowStartDisplay ~ $windowEndDisplay (Asia/Seoul)"
+        $headerLines += "점검 창: $windowStartDisplay ~ $windowEndDisplay (Asia/Seoul)"
+    }
+    if ($headerLines.Count -gt 0) {
+        $insertion = [string]::Join("`r`n", $headerLines)
         $normalized = [regex]::Replace(
             $normalized,
             '(?m)^(#\s*인천교육청 언론보도 현황\s*)$',
-            ('$1' + "`r`n`r`n" + $windowLine),
+            ('$1' + "`r`n`r`n" + $insertion),
             [System.Text.RegularExpressions.RegexOptions]::None,
             [timespan]::FromSeconds(5)
         )
@@ -819,6 +830,8 @@ Apply these rules:
 - Do not mention that this is a weekend, holiday, or skipped schedule
 - Do not output conversational text before or after the report
 - Your entire response must be the report itself and nothing else. The very first character you print must be `#`.
+- The first line after the title must be exactly: - 보고일: $reportDateDisplay
+  The downstream database parser keys on the literal label 보고일 with that ISO date. Never rename it (no 기준일, 날짜, 보고 기준일) and do not move it below other lines.
 - Never print a transitional or meta sentence such as "모든 검증이 끝났습니다", "최종 보고서를 출력합니다", or any similar narration about what you are about to do, in Korean or English, before the title. Do not print the title line more than once and do not use a `---` separator before the report.
 - Do not output diffs, patches, tool logs, or save confirmations
 

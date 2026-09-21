@@ -53,6 +53,29 @@ model paraphrased the window ("당일 오전 9시"). `Repair-MarkdownReport` now
 `점검 창: <start> ~ <end> (Asia/Seoul)` line under the title whenever either literal is missing, making
 the check deterministic.
 
+Known downstream quirk (fixed 2026-09-21): `newsdb.py ingest --briefing` derives the batch date from one of
+`YYYY. M. D.(요일) … 주요 언론보도 현황입니다`, `보고일: YYYY-MM-DD`, or a `## 보도일` block, and exits 2
+("날짜 헤더를 찾지 못해 인제스트를 중단합니다") when none is present. The 2026-09-21 scheduled run wrote
+`- 기준일: 2026-09-21` instead, so the report and candidate promotion succeeded but the whole downstream
+stage (DB → digest → site) was skipped (`STATUS: PARTIAL [DOWNSTREAM]`). `Repair-MarkdownReport` now injects
+`- 보고일: <ReportDate>` under the title when no recognized date header exists (same block as the window
+injection), and the prompt pins that line explicitly. Rule of thumb: metadata the runner already knows
+(report date, check window) is injected by the runner, never left to the model's phrasing.
+
+Recovery for this failure class needs no Claude re-run — the Markdown is already valid content. Re-apply the
+repair to the real file and run the downstream steps only:
+
+```powershell
+# 1) repair in place (+ regenerate the briefing HTML)
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\run-daily-news-picker-claude.ps1" -BasePath "$env:USERPROFILE\Documents\Codex\DailyNewsPicker" -ReportDate "YYYY-MM-DD" -CollectionTime "09:00" -ValidateReportPath "<folder>\인천교육청 언론보도 현황.md" -ValidationHtmlOutputPath "<folder>\인천교육청 언론보도 현황.html"
+# 2) downstream (organizer scripts)
+python newsdb.py ingest --briefing "<folder>\인천교육청 언론보도 현황.md"
+python newsdb.py ingest --json "<folder>\verified_collected_articles.json"
+python newsdb.py group --date YYYY-MM-DD
+python newsdb.py digest --date YYYY-MM-DD --format html --out "<folder>\교육뉴스 다이제스트.html"
+python publish_site.py --site-dir "$env:USERPROFILE\Documents\Codex\EduNewsSite" --date YYYY-MM-DD --push
+```
+
 ## Default Paths
 
 - Base output folder: set explicitly with `-BasePath` or the `DAILY_NEWS_OUTPUT_DIR` environment variable. If neither is set, the task registration script uses `%USERPROFILE%\Documents\Codex\DailyNewsPicker`.
