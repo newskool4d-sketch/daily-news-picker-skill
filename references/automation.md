@@ -76,6 +76,38 @@ python newsdb.py digest --date YYYY-MM-DD --format html --out "<folder>\교육�
 python publish_site.py --site-dir "$env:USERPROFILE\Documents\Codex\EduNewsSite" --date YYYY-MM-DD --push
 ```
 
+## Headless Authentication (long-lived token, 2026-10-01)
+
+Failure class `STATUS: FAILED [CLAUDE_EXIT]` (exit 1, both attempts end within ~30 s, `claude.stderr.log`
+empty) has two causes — always read `<engineWorkDir>\last-message.md` first to tell them apart:
+
+| last-message.md text | Cause | Recovery |
+|---|---|---|
+| `Failed to authenticate: OAuth session expired and could not be refreshed` | login session expired (`.credentials.json` `expiresAt` reset to 0) | re-authenticate, then backfill |
+| `You've hit your session limit · resets <time>` | Max plan usage limit | wait until reset, then backfill |
+
+Measured cadence of the login-expiry case on the Claude engine: 2026-09-01 and 2026-10-01 (30 days apart).
+The claude.ai refresh token is issued for ~27 days from the interactive login and the daily refresh does not
+extend it, so a plain `/login` has to be repeated about monthly.
+
+Fix applied 2026-10-01: a long-lived token decouples the scheduler from the interactive login.
+
+1. In an interactive terminal run `claude setup-token` (browser approval once). Never paste the token into chat
+   or any file in this repo.
+2. Store it as a **User** environment variable named `CLAUDE_CODE_OAUTH_TOKEN` (Windows "환경 변수" dialog:
+   `rundll32 sysdm.cpl,EditEnvironmentVariables`). Close the outer dialog with OK, not Cancel — otherwise nothing
+   is saved. Verify with `[Environment]::GetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN','User')` (check length
+   only).
+3. No runner change is needed — `run-daily-news-picker-claude.ps1` inherits the variable. `claude auth status` then
+   reports `"authMethod": "oauth_token"`, and `test-claude-headless-auth.ps1` from a **new** terminal returns
+   `RESULT: PASS` (measured 2026-10-01 17:26).
+4. Token lifetime is not yet measured here; when it expires, rerun `claude setup-token` and replace the variable
+   value only.
+
+Open check: whether Task Scheduler picks up the new user variable without re-registration — confirmed by the
+first scheduled run after 2026-10-01 (and definitively by a successful run after the refresh token expiry
+around 2026-10-28).
+
 ## Default Paths
 
 - Base output folder: set explicitly with `-BasePath` or the `DAILY_NEWS_OUTPUT_DIR` environment variable. If neither is set, the task registration script uses `%USERPROFILE%\Documents\Codex\DailyNewsPicker`.
