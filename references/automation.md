@@ -76,37 +76,33 @@ python newsdb.py digest --date YYYY-MM-DD --format html --out "<folder>\교육�
 python publish_site.py --site-dir "$env:USERPROFILE\Documents\Codex\EduNewsSite" --date YYYY-MM-DD --push
 ```
 
-## Headless Authentication (long-lived token, 2026-10-01)
+## Headless Authentication (measured 2026-10-01 ~ 10-02)
 
 Failure class `STATUS: FAILED [CLAUDE_EXIT]` (exit 1, both attempts end within ~30 s, `claude.stderr.log`
-empty) has two causes — always read `<engineWorkDir>\last-message.md` first to tell them apart:
+empty) has three observed causes — always read `<engineWorkDir>\last-message.md` first to tell them apart:
 
 | last-message.md text | Cause | Recovery |
 |---|---|---|
-| `Failed to authenticate: OAuth session expired and could not be refreshed` | login session expired (`.credentials.json` `expiresAt` reset to 0) | re-authenticate, then backfill |
+| `Failed to authenticate: OAuth session expired and could not be refreshed` | login session expired (`.credentials.json` `expiresAt` reset to 0) | user runs `/login` in an interactive `claude`, then standard backfill |
 | `You've hit your session limit · resets <time>` | Max plan usage limit | wait until reset, then backfill |
+| `Failed to authenticate. API Error: 401 OAuth access token is invalid` | a token supplied via `CLAUDE_CODE_OAUTH_TOKEN` is revoked (no refresh path) | delete the variable, then backfill from a **new** terminal |
 
 Measured cadence of the login-expiry case on the Claude engine: 2026-09-01 and 2026-10-01 (30 days apart).
 The claude.ai refresh token is issued for ~27 days from the interactive login and the daily refresh does not
-extend it, so a plain `/login` has to be repeated about monthly.
+extend it (`refreshTokenExpiresAt` stays fixed), so a plain `/login` has to be repeated about monthly. This is
+the accepted operating mode.
 
-Fix applied 2026-10-01: a long-lived token decouples the scheduler from the interactive login.
+**Do not use `claude setup-token` / `CLAUDE_CODE_OAUTH_TOKEN` on this machine.** Tried 2026-10-01: the token
+passed a headless test at 17:26, then the 2026-10-02 09:00 scheduled run failed with `401 OAuth access token
+is invalid` while the interactive login token still returned HTTP 200. No `/login` or `setup-token` was run in
+between; the only event was the interactive session's automatic credential refresh at 08:12. Conclusion: a
+long-lived token is revoked when another session on the same account refreshes its login (undocumented — the
+docs only state a one-year validity). With the desktop app keeping sessions open all day, the token cannot
+survive. While the stale variable exists, **every new Claude session, including interactive ones, fails with
+401**, because the variable takes precedence over `.credentials.json`. The variable was deleted 2026-10-02.
 
-1. In an interactive terminal run `claude setup-token` (browser approval once). Never paste the token into chat
-   or any file in this repo.
-2. Store it as a **User** environment variable named `CLAUDE_CODE_OAUTH_TOKEN` (Windows "환경 변수" dialog:
-   `rundll32 sysdm.cpl,EditEnvironmentVariables`). Close the outer dialog with OK, not Cancel — otherwise nothing
-   is saved. Verify with `[Environment]::GetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN','User')` (check length
-   only).
-3. No runner change is needed — `run-daily-news-picker-claude.ps1` inherits the variable. `claude auth status` then
-   reports `"authMethod": "oauth_token"`, and `test-claude-headless-auth.ps1` from a **new** terminal returns
-   `RESULT: PASS` (measured 2026-10-01 17:26).
-4. Token lifetime is not yet measured here; when it expires, rerun `claude setup-token` and replace the variable
-   value only.
-
-Open check: whether Task Scheduler picks up the new user variable without re-registration — confirmed by the
-first scheduled run after 2026-10-01 (and definitively by a successful run after the refresh token expiry
-around 2026-10-28).
+Side finding: the scheduled task (`LogonType=Interactive`) did inherit a user environment variable added the
+previous day without re-registration.
 
 ## Default Paths
 
