@@ -100,16 +100,21 @@ class RelevanceRulesTest(unittest.TestCase):
             self.assertIn(query, queries)
 
     def test_runner_keeps_approved_briefing_then_candidate_publication_order(self):
-        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
         briefing_call = '@($organizerScript, "ingest", "--briefing", $markdownPath)'
         candidate_call = '@($organizerScript, "ingest", "--json", $ingestJsonPath)'
-        self.assertIn(briefing_call, runner)
-        self.assertIn("Copy-Item -Path $collectedJsonPath -Destination $persistedCollectedJsonPath", runner)
-        self.assertIn(candidate_call, runner)
-        self.assertLess(
-            runner.index(briefing_call),
-            runner.index(candidate_call),
-        )
+        for runner_name in (
+            "run-daily-news-picker.ps1",
+            "run-daily-news-picker-claude.ps1",
+        ):
+            with self.subTest(runner=runner_name):
+                runner = (ROOT / "scripts" / runner_name).read_text(encoding="utf-8")
+                self.assertIn(briefing_call, runner)
+                self.assertIn(
+                    "Copy-Item -Path $collectedJsonPath -Destination $persistedCollectedJsonPath",
+                    runner,
+                )
+                self.assertIn(candidate_call, runner)
+                self.assertLess(runner.index(briefing_call), runner.index(candidate_call))
 
     def test_runner_surfaces_downstream_native_command_failures(self):
         runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")

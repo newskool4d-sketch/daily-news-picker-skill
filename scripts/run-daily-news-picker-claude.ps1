@@ -18,20 +18,20 @@
     [switch]$SkipDownstream
 )
 
-# 2026-08-21 Codex(gpt-5.6-sol) -> Claude 예약작업 이관 초안.
+# 2026-08-21 Codex(gpt-5.6-sol) -> Claude 예약작업 이관.
 # 원본: run-daily-news-picker.ps1 (Codex exec 엔진). 6단계 파이프라인 중 3단계(검증·랭킹·작성)의
 # 엔진만 교체했다 — 공휴일 계산, RSS 1차 수집, Markdown 검증/복구, 후보 승격, 하류 DB/사이트 배포는
 # 원본과 동일 로직을 그대로 사용한다.
 # 변경 요지:
 #  - codex exec(-s read-only, -m gpt-5.6-sol) -> claude -p --model sonnet
-#  - 쓰기 차단을 샌드박스 플래그가 아니라 --allowedTools 화이트리스트(Read/Glob/Grep/WebSearch/WebFetch)로
-#    구조적으로 강제 — Edit/Write/Bash 자체가 도구 목록에 없어 "쓰기 금지" 프롬프트 지시보다 강함.
-#  - 무인 실행이므로 --permission-mode bypassPermissions로 승인 프롬프트 자체를 없앤다(위 화이트리스트와 결합).
+#  - --tools로 읽기·검색 도구만 노출하고 --allowedTools로 그 도구의 무인 실행을 허용한다.
+#  - dontAsk는 나머지 승인 요청을 거부하며, safe-mode와 빈 strict MCP 구성으로 사용자
+#    플러그인·훅·MCP의 쓰기 도구가 이 뉴스 확인 실행에 유입되지 않도록 한다.
 #  - CollectionTime 기본값 09:00 (사용자 지시로 05:00 -> 09:00 변경, 2026-08-21).
 #  - 실패 시에도 run.log/claude.stderr.log를 보존한다(원본은 finally에서 항상 삭제 — 2026-08-21 자동 실행
 #    실패 원인 조사 시 로그가 이미 지워져 있어 원인 규명이 불가능했던 문제의 재발 방지).
-# 아직 하지 않은 것: Windows Task Scheduler 액션 교체, SKILL.md/register 스크립트 수정, 실사용 커밋·푸시.
-# 이 스크립트는 초안이며 -DryRun / 수동 1회 실행으로 검증 후 사용자 승인을 받아 스케줄러에 등록한다.
+# 현재 등록 작업은 이 실행기에 CollectionTime 09:00을 명시한다(2026-11-03 XML 조회).
+# 이번 개선은 등록 작업과 edu-news-organizer 하류 호출을 변경하지 않는다.
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -164,6 +164,115 @@ function Get-PreviousBusinessDay {
     throw "직전 업무일을 계산하지 못했습니다: $Date"
 }
 
+function Test-ReportHttpUrl {
+    param([string]$Url)
+
+    if ([string]::IsNullOrWhiteSpace($Url) -or $Url -match '\s') {
+        return $false
+    }
+    $parsed = $null
+    return ([uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$parsed) -and
+        $parsed.Scheme -in @('http', 'https') -and
+        -not [string]::IsNullOrWhiteSpace($parsed.Host))
+}
+
+function Get-ReportMarkdownLinkPattern {
+    # Balancing groups keep parentheses inside an article URL intact.
+    return '\[(?<label>[^\]\r\n]+)\]\((?<url>https?://(?:[^()\s]|\((?<paren>)|\)(?<-paren>))+(?(paren)(?!)))\)'
+}
+
+function Get-ReportArticleUrls {
+    param([string]$Text)
+
+    foreach ($line in [regex]::Split($Text, '\r?\n')) {
+        $candidate = $line.Trim()
+        if (Test-ReportHttpUrl -Url $candidate) {
+            $candidate
+            continue
+        }
+        foreach ($linkMatch in [regex]::Matches($line, (Get-ReportMarkdownLinkPattern))) {
+            $candidate = $linkMatch.Groups['url'].Value
+            if (Test-ReportHttpUrl -Url $candidate) {
+                $candidate
+            }
+        }
+    }
+}
+
+function ConvertTo-OrganizerCompatibleArticleLinks {
+    param([string]$Markdown)
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in [regex]::Split($Markdown, '\r?\n')) {
+        [void]$lines.Add($line)
+    }
+    $insideMain = $false
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -match '^##[ \t]+(.+?)\s*$') {
+            $insideMain = ($Matches[1].Trim() -eq '주요 언론보도')
+            continue
+        }
+        if (-not $insideMain -or $lines[$index] -notmatch '^■') {
+            continue
+        }
+        if ($index + 1 -lt $lines.Count -and $lines[$index + 1].Trim() -cmatch '^https?://' -and
+            (Test-ReportHttpUrl -Url $lines[$index + 1].Trim())) {
+            continue
+        }
+        for ($sourceIndex = $index + 1; $sourceIndex -lt $lines.Count; $sourceIndex++) {
+            if ($lines[$sourceIndex] -match '^(?:■|#{1,6}(?:[ \t]+|$))') {
+                break
+            }
+            $source = $lines[$sourceIndex].Trim()
+            $url = $null
+            $replacement = ''
+            if (Test-ReportHttpUrl -Url $source) {
+                $url = $source
+            } else {
+                $linkMatch = [regex]::Match($source, ('^(?:' + (Get-ReportMarkdownLinkPattern) + ')$'))
+                if ($linkMatch.Success -and (Test-ReportHttpUrl -Url $linkMatch.Groups['url'].Value)) {
+                    $url = $linkMatch.Groups['url'].Value
+                    # Keep the link label as plain text instead of discarding it.
+                    $replacement = '링크 설명: ' + $linkMatch.Groups['label'].Value
+                }
+            }
+            if ($url) {
+                $url = [regex]::Replace($url, '^https?://', { param($match) $match.Value.ToLowerInvariant() }, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $lines[$sourceIndex] = $replacement
+                $lines.Insert($index + 1, $url)
+                break
+            }
+        }
+    }
+    return [string]::Join([Environment]::NewLine, $lines)
+}
+
+function ConvertTo-ReportHtmlInline {
+    param([string]$Text)
+
+    $candidate = $Text.Trim()
+    if (Test-ReportHttpUrl -Url $candidate) {
+        $encodedUrl = [System.Net.WebUtility]::HtmlEncode($candidate)
+        return ('<a href="' + $encodedUrl + '" rel="noopener noreferrer">' + $encodedUrl + '</a>')
+    }
+
+    $html = [System.Text.StringBuilder]::new()
+    $cursor = 0
+    foreach ($linkMatch in [regex]::Matches($Text, (Get-ReportMarkdownLinkPattern))) {
+        [void]$html.Append([System.Net.WebUtility]::HtmlEncode($Text.Substring($cursor, $linkMatch.Index - $cursor)))
+        $url = $linkMatch.Groups['url'].Value
+        if (Test-ReportHttpUrl -Url $url) {
+            [void]$html.Append('<a href="' + [System.Net.WebUtility]::HtmlEncode($url) + '" rel="noopener noreferrer">' +
+                [System.Net.WebUtility]::HtmlEncode($linkMatch.Groups['label'].Value) + '</a>')
+        } else {
+            [void]$html.Append([System.Net.WebUtility]::HtmlEncode($linkMatch.Value))
+        }
+        $cursor = $linkMatch.Index + $linkMatch.Length
+    }
+    [void]$html.Append([System.Net.WebUtility]::HtmlEncode($Text.Substring($cursor)))
+    return $html.ToString()
+}
+
 function Convert-MarkdownToHtmlDocument {
     param(
         [string]$MarkdownPath,
@@ -173,15 +282,16 @@ function Convert-MarkdownToHtmlDocument {
 
     $markdown = Get-Content $MarkdownPath -Raw -Encoding UTF8
 
-    $escaped = [System.Net.WebUtility]::HtmlEncode($markdown)
+    $escaped = (@([regex]::Split($markdown, '\r?\n') | ForEach-Object { ConvertTo-ReportHtmlInline -Text $_ }) -join "`n")
     $escaped = $escaped -replace '(?m)^### (.+)$', '<h3>$1</h3>'
     $escaped = $escaped -replace '(?m)^## (.+)$', '<h2>$1</h2>'
     $escaped = $escaped -replace '(?m)^# (.+)$', '<h1>$1</h1>'
     $escaped = $escaped -replace '(?m)^- (.+)$', '<li>$1</li>'
     $escaped = $escaped -replace '(<li>.*</li>(\r?\n)?)+', { param($m) "<ul>`n$($m.Value)</ul>`n" }
-    $escaped = $escaped -replace '\[(.+?)\]\((https?://[^\s")]+)\)', '<a href="$2" rel="noopener noreferrer">$1</a>'
     $escaped = $escaped -replace "(`r`n|`n){2,}", "</p><p>"
+    $escaped = $escaped -replace "(`r`n|`n)", "<br>`n"
     $body = "<p>$escaped</p>"
+    $safeTitle = [System.Net.WebUtility]::HtmlEncode($Title)
 
     $generatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $html = @"
@@ -191,7 +301,7 @@ function Convert-MarkdownToHtmlDocument {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>$Title</title>
+  <title>$safeTitle</title>
   <style>
     :root {
       color-scheme: light;
@@ -393,7 +503,7 @@ function Convert-MarkdownToHtmlDocument {
     <header>
       <div>
         <p class="kicker">Morning Editorial Brief</p>
-        <h1>$Title</h1>
+        <h1>$safeTitle</h1>
         <p class="deck">인천광역시교육청 및 산하기관 언론보도를 현안성, 기관 관련성, 후속 대응 필요성 기준으로 선별한 일일 브리핑입니다.</p>
       </div>
       <ul class="meta">
@@ -565,6 +675,7 @@ function Repair-MarkdownReport {
             $normalized = [string]::Join([Environment]::NewLine, $lines)
         }
     }
+    $normalized = ConvertTo-OrganizerCompatibleArticleLinks -Markdown $normalized
     [System.IO.File]::WriteAllText($Path, $normalized + [Environment]::NewLine, $script:Utf8NoBom)
 }
 
@@ -581,11 +692,45 @@ function Get-MarkdownReportValidationFailures {
     if (-not ($trimmed.StartsWith("# 인천교육청 언론보도 현황") -or ($trimmed -match '^20\d{2}\.\s*\d{1,2}\.\s*\d{1,2}\.'))) {
         [void]$failures.Add('title')
     }
-    if ($content -notmatch '(?m)^(?:##\s*)?주요 언론보도\s*$') {
+    $mainSections = [regex]::Matches($content, '(?m)^##[ \t]+주요 언론보도[ \t]*\r?$')
+    if ($mainSections.Count -ne 1) {
         [void]$failures.Add('main_section')
-    }
-    if (-not (($content -match '(?m)^■\s+.+\s+-\s+.+$') -or ($content -match '확인된 유의미 기사 없음'))) {
-        [void]$failures.Add('article_list')
+    } else {
+        $mainContent = $content.Substring($mainSections[0].Index + $mainSections[0].Length)
+        $nextSection = [regex]::Match($mainContent, '(?m)^##(?:[ \t]+|$)')
+        if ($nextSection.Success) {
+            $mainContent = $mainContent.Substring(0, $nextSection.Index)
+        }
+        $articles = [regex]::Matches($mainContent, '(?m)^■[^\r\n]*')
+        $noArticles = $mainContent -match '확인된 유의미 기사 없음'
+        if ($articles.Count -eq 0 -and -not $noArticles) {
+            [void]$failures.Add('article_list')
+        }
+        if ($articles.Count -gt 0 -and $noArticles) {
+            [void]$failures.Add('article_list_conflict')
+        }
+        for ($index = 0; $index -lt $articles.Count; $index++) {
+            $articleNumber = $index + 1
+            if ($articles[$index].Value -notmatch '^■[ \t]+.+[ \t]+-[ \t]+.+$') {
+                [void]$failures.Add("article_${articleNumber}_title")
+            }
+            $blockEnd = if ($index + 1 -lt $articles.Count) { $articles[$index + 1].Index } else { $mainContent.Length }
+            $block = $mainContent.Substring($articles[$index].Index, $blockEnd - $articles[$index].Index)
+            $nextHeading = [regex]::Match($block, '(?m)^#{1,6}(?:[ \t]+|$)')
+            if ($nextHeading.Success) {
+                $block = $block.Substring(0, $nextHeading.Index)
+            }
+            if (@(Get-ReportArticleUrls -Text $block).Count -eq 0) {
+                [void]$failures.Add("article_${articleNumber}_url")
+            } else {
+                $blockLines = [regex]::Split($block, '\r?\n')
+                # edu-news-organizer reads the raw URL immediately after each ■ line.
+                if ($blockLines.Count -lt 2 -or $blockLines[1].Trim() -cnotmatch '^https?://' -or
+                    -not (Test-ReportHttpUrl -Url $blockLines[1].Trim())) {
+                    [void]$failures.Add("article_${articleNumber}_url_format")
+                }
+            }
+        }
     }
     if ($content -notmatch [regex]::Escape($windowStartDisplay)) {
         [void]$failures.Add('window_start')
@@ -946,12 +1091,19 @@ with original media URLs already resolved. Read it with the Read tool.
 
 # 프롬프트는 argv가 아니라 stdin으로 전달한다 (Codex 러너에서 겪은 argv 개행 절단 사고를
 # 답습하지 않기 위한 예방 조치 — claude -p도 동일 패턴 유지).
+# 임시 cwd 밖의 SKILL.md·references만 읽도록 현재 스킬 루트를 좁게 추가한다.
+$skillRoot = Split-Path -Parent $PSScriptRoot
 $argList = @(
     "-p",
     "--output-format", "text",
     "--model", $Model,
-    "--allowedTools", "Read Glob Grep WebSearch WebFetch",
-    "--permission-mode", "bypassPermissions"
+    "--safe-mode",
+    "--add-dir", $skillRoot,
+    "--tools", "Read,Glob,Grep,WebSearch,WebFetch",
+    "--allowedTools", "Read,Glob,Grep,WebSearch,WebFetch",
+    "--permission-mode", "dontAsk",
+    "--strict-mcp-config",
+    "--mcp-config", '{"mcpServers":{}}'
 )
 
 $lastMessagePath = Join-Path $engineWorkDir "last-message.md"

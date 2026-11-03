@@ -18,8 +18,8 @@ This skill should be treated as a default daily monitoring skill, not only an ex
 
 Default operating rule:
 
-- 기준 시각: 평일 오전 5시
-- 기준 범위: 직전 업무일 점검 이후 누적된 언론보도 현황
+- 운영 예약: 매일 오전 9시(KST)에 실행하며, 토·일·공휴일에는 기본 보고서 생성을 건너뜀
+- 기사 수집 창: 직전 업무일 오전 9시 이상 ~ 보고일 오전 9시 미만
 - 제외일: 토요일, 일요일, 공휴일. 제외일 기사는 다음 평일 점검 창에 포함
 - 별도 지시가 없으면 위 기준을 적용
 - 결과 저장: `md`와 `html` 두 형식으로 함께 저장
@@ -27,6 +27,12 @@ Default operating rule:
 - 기본 산출물: 실제 공유 문안에 맞춘 당일 주요 언론보도 전체 링크 목록
 - 기사 수 제한 금지: 상위 5건만 남기지 말고, 기간 안의 관련 원 기사 링크를 모두 보존
 - 기본 기대 동작: 별도 명령이 없어도 일일 뉴스 점검 작업에 우선 적용
+
+현재 예약은 Claude 실행기에 `-CollectionTime "09:00"`을 명시한다. 수동 실행도 명시한
+`-CollectionTime`이 우선하며, 생략 시 Claude 실행기는 09:00, Codex 보조 실행기는 05:00을 쓴다.
+예약 등록 스크립트의 `-StartTime` 기본값 05:00은 새 등록에만 적용되며, 현재 예약의 09:00과 구분한다.
+실행이 늦어져도 같은 `ReportDate`의 수집 마감 시각은 유지한다. 자세한 운영 기록은
+[references/automation.md](./references/automation.md)를 따른다.
 
 ## Quick Start
 
@@ -46,7 +52,9 @@ Always browse because news freshness matters.
 Use the deep-research pattern in a faster news-monitoring form:
 
 1. Confirm the time window from the user request.
-   If the user gives no separate 기간 조건, use the current business day 5:00 AM collection window.
+   If the user gives no separate 기간 조건, use the current business day 9:00 AM KST collection window
+   (previous business day 09:00 inclusive through report day 09:00 exclusive).
+   For an explicitly configured runner, use its effective `CollectionTime` instead of the actual run finish time.
    If the user says `오늘`, `어제`, `이번 주`, or `최근`, restate it with exact dates.
    If the request date is a weekend or public holiday, say that the default briefing is skipped unless the user explicitly requests a manual run.
 2. Collect candidate articles, preferring the deterministic RSS collector.
@@ -78,6 +86,7 @@ Use the deep-research pattern in a faster news-monitoring form:
    Use official press releases and notices as fact-checking or last-resort fallback sources only.
 5. De-duplicate conservatively.
    Remove only true duplicates: same URL, same outlet duplicate pages, or materially identical reposts of the same event.
+   A shared event or headline alone is not a duplicate: preserve follow-up reporting, new facts, and different issues.
    Do not drop distinct issues, institutions, programs, events, recruitment notices, library items, or affiliated-institution stories only because they are routine or lower priority.
 6. Rank items by reporting value for ordering only.
    Put policy decisions, budget issues, safety incidents, personnel matters, audits, institutional openings/closures, and student-impacting changes above routine 행사 coverage, but ranking must not become an inclusion cap.
@@ -92,10 +101,13 @@ Use the deep-research pattern in a faster news-monitoring form:
 10. Write a full coverage-status briefing.
    Default main section format should match the office sharing style:
    `■ 기사 제목 - 매체명` on one line, followed by the source URL on the next line.
+   Every article block must have its own absolute HTTP(S) original-article URL; a URL under another article
+   or `제외 또는 참고` cannot satisfy that requirement. Use `확인된 유의미 기사 없음` only when the main list is empty.
    For a canonical real-world reference of format and coverage breadth, see [examples/2026-06-26.md](./examples/2026-06-26.md).
    Use `핵심 요약` only to highlight important issues; do not move valid lower-priority articles out of the main list solely because they are less important.
 11. Save the result files.
    Create a dated folder in the `인천교육청 언론보도 현황(YYYYMMDD)` format and store both the Markdown file and the HTML file in that folder.
+   Preserve article order and link destinations in both formats, with clickable links below each HTML article title.
 
 ## Coverage Tracking Mode (역방향 게재 추적)
 

@@ -57,7 +57,7 @@ collector candidates for audit, but publish only explicit briefing items or cand
 - Exclude stale articles outside the requested period unless needed as background.
 - Exclude low-information reposts, clickbait, automated content farms, and duplicates.
 - Article form: prefer journalist-bylined press articles. Official education-office press releases are verification or fallback sources, not normal selected article links. Do not silently drop raw press-release reprints from monitored outlets; collect them, label them as `보도자료 전재/반복 보도`, and place them in `제외 또는 참고` unless they are the only accessible coverage for an operationally important item.
-- Cross-outlet duplicates: when multiple outlets cover the same event with materially identical content, keep the single most useful external article as the representative link. Do not merge or drop separate events, separate institutions, or separate program items just because they are lower priority.
+- Duplicates: merge the same URL, duplicate pages from one outlet, or reposts whose bodies are materially identical; keep the single most useful external article as the representative link. The same event, subject, or headline alone is insufficient. Preserve follow-up reporting, new facts, and different issues, as well as separate events, institutions, and program items regardless of priority.
 - Anti-fabrication: never invent titles or URLs; include only URLs confirmed to resolve to the actual article. If nothing qualifies, state it plainly.
 - Prefer directly accessible links.
 - Low-count guard: if the daily count seems unusually low for a normal business-day coverage-status report, run the monitored-outlet domain checks and official verification checks before writing `확인된 유의미 기사 없음` or producing a sparse report.
@@ -69,6 +69,10 @@ first and the preserved candidate JSON second; publish the briefing items plus c
 `publication_eligible` is explicitly `true` after body verification. Triage status alone never grants publication
 permission. This filtering must not replace or redesign the existing same-story grouping, three-section layout,
 or responsive grid.
+
+Keep the `edu-news-organizer` connection and its ingest order: briefing Markdown first, then the verified
+candidate JSON (or the private raw pool when promotion produced no derived file). Preserve the original
+`collected_articles.json` separately; report validation must not reduce that audit pool to the final article list.
 
 When the scheduled runner is used, report-body candidates promoted from the collector must also be listed in the
 runner's `DAILY_NEWS_VERIFIED_CANDIDATES` JSON marker with the exact `original_url`, `verified: true`,
@@ -87,6 +91,8 @@ Default structure:
    - default item format:
      `■ 기사 제목 - 매체명`
      `URL`
+   - each article block needs its own absolute HTTP(S) original URL; a link from another article or the reference section does not qualify
+   - `확인된 유의미 기사 없음` is allowed only when no main-list article is present
    - order by operational importance, then 본청, 교육지원청, 직속기관, 학교/의회/지역현안 as appropriate
 4. `제외 또는 참고`
    - true duplicate articles, background items, uncertain items
@@ -97,6 +103,7 @@ Default structure:
 - Save completed briefings as both `.md` and `.html`.
 - Create one folder per run date named `인천교육청 언론보도 현황(YYYYMMDD)`.
 - Keep title and article order aligned across Markdown and HTML.
+- Render each article URL as a clickable HTML link on a separate line below its title, preserving the URL destination and safely escaping title/link text.
 - If the base path is unclear, infer from context or ask briefly.
 
 ## Edge Cases

@@ -10,12 +10,26 @@ inside it differ.
 | | Codex (original) | Claude (2026-08-21) |
 |---|---|---|
 | Runner script | `scripts/run-daily-news-picker.ps1` | `scripts/run-daily-news-picker-claude.ps1` |
-| CLI invoked | `codex exec` (`-m gpt-5.6-sol`, `-s read-only`) | `claude -p` (`--model sonnet`, `--allowedTools "Read Glob Grep WebSearch WebFetch"`, `--permission-mode bypassPermissions`) |
-| Write access during the run | sandboxed via `-s read-only` | structurally impossible — the allowed-tools list has no write/edit/bash tool |
-| Unattended auth | `codex` session/API credentials | `claude.exe` at `%CLAUDE_CODEX_CLAUDE_BIN%` (falls back to `claude` on PATH), verified headless via `scripts/test-claude-headless-auth.ps1` |
+| CLI invoked | `codex exec` (`-m gpt-5.6-sol`, `-s read-only`) | `claude -p` (`--model sonnet`, `--safe-mode`, explicit `--tools`/`--allowedTools`, `--permission-mode dontAsk`; see Safety Notes) |
+| Write access during the run | sandboxed via `-s read-only` | built-in tools restricted to Read/Glob/Grep/WebSearch/WebFetch; inherited customization and MCP isolated by the runner options; normal-run verification pending |
+| Unattended auth | `codex` session/API credentials | `claude.exe` at `%CLAUDE_CODEX_CLAUDE_BIN%` (falls back to `claude` on PATH); diagnostic: `scripts/test-claude-headless-auth.ps1` |
 
 **Currently registered in Task Scheduler**: the Claude runner, `\DailyNewsPicker\IncheonEducationNews`, daily at 09:00
 (changed from 05:00 on 2026-08-21 together with the engine switch).
+
+Reconfirmed 2026-11-03 by reading `%WINDIR%\System32\Tasks\DailyNewsPicker\IncheonEducationNews` directly:
+the enabled daily trigger starts at `2026-08-21T00:00:00Z` (09:00 KST), and the action explicitly passes
+`-CollectionTime "09:00"` to the Claude runner. CIM and `schtasks` queries were unavailable in this session;
+the saved task XML, runner code, and recent candidate metadata were compared instead. No task was re-registered.
+
+### Execution time and article cutoff
+
+- Scheduled invocation: every day at 09:00 KST. The runner skips generation on weekends and Korean public holidays unless forced.
+- Article window: previous business day 09:00 inclusive through report day 09:00 exclusive. Skipped-day articles therefore enter the next business-day window.
+- Explicit `-CollectionTime` takes precedence. Without it, the Claude runner defaults to 09:00 and the Codex runner to 05:00.
+- The registration script's `-StartTime` defaults to 05:00 and supplies both the task trigger and `-CollectionTime` for a new registration. That default does not change the current task's explicit 09:00 action.
+- A delayed run with the same `ReportDate` keeps the configured cutoff; it does not extend the window to the collection finish time. A run after midnight without an explicit report date may select a different report day.
+- The 2026-11-03 candidate file records `2026-11-02 09:00 ~ 2026-11-03 09:00`, despite collection at 11:17 and report-processing log entries at 11:17–11:20. Whether that was a delayed or manual run was not established.
 
 **Why the switch**: the Codex-engine run on 2026-08-21 06:07 recorded `STATUS: FAILED [OUTPUT_VALIDATION]` —
 not a network/MCP failure, but the model repeatedly using ad-hoc `##`-level category headers instead of the
@@ -24,9 +38,9 @@ produced a valid report on the first attempt with broader outlet diversity (12+ 
 attempt), after a similar preamble-text quirk (`claude -p` prefixing the report with a stray "모든 검증이 끝났습니다"
 sentence) was fixed by tightening the prompt and adding a title-deduplication step to `Repair-MarkdownReport`.
 
-**To roll back to Codex**: re-run `scripts/register-daily-news-picker-task.ps1` with
+**To switch to the original Codex/05:00 configuration**: re-run `scripts/register-daily-news-picker-task.ps1` with
 `-ScriptPath scripts\run-daily-news-picker.ps1` and `-StartTime 05:00`. Nothing about the Codex runner was
-changed or removed.
+removed. To change only the engine while preserving the current window, explicitly use `-StartTime 09:00` instead.
 
 ## Manual Re-run / Backfill (Claude engine)
 
@@ -118,11 +132,11 @@ previous day without re-registration.
 
 ## Scripts
 
-- Runner: `scripts/run-daily-news-picker.ps1`
+- Current scheduled runner: `scripts/run-daily-news-picker-claude.ps1`; Codex alternative: `scripts/run-daily-news-picker.ps1`
 - Task registration: `scripts/register-daily-news-picker-task.ps1`
 - RSS collector: `scripts/collect_news_rss.py` — Google News RSS 주 엔진 + 네이버 뉴스 API 보강의 결정론적 1차 수집기 (2026-07-17 실측 채택).
-  러너가 Codex 실행 전에 자동 호출하며, 수동 단독 실행도 가능 (`--start/--end/--out-dir`).
-- Verification promotion: `scripts/promote_verified_candidates.py` — Codex의 본문 검증 표식을
+  러너가 선택한 모델 실행 전에 자동 호출하며, 수동 단독 실행도 가능 (`--start/--end/--out-dir`).
+- Verification promotion: `scripts/promote_verified_candidates.py` — 모델의 본문 검증 표식을
   검증 후보 파생 JSON으로 변환하고, 원본 후보 풀은 변경하지 않는다.
 
 ## Execution Model
@@ -134,30 +148,51 @@ previous day without re-registration.
 3. If it is a weekend or public holiday, it skips generation unless forced.
 4. It creates the dated output folder and writes `run.log` with explicit `STARTED`, `SUCCEEDED`, or `FAILED` status lines.
 5. It runs the RSS collector (`collect_news_rss.py`) for the exact check window and drops `collected_articles.json`
-   into the Codex work directory. On collector failure, timeout, or a 0-article result it falls back to Codex self-search.
-6. It runs `codex exec --search` with the `daily-news-picker` instructions; when the candidate pool exists, the prompt
-   directs Codex to use it as the primary pool (with an explicit relevance check for `engine: naver-api` entries)
+   into the engine work directory. On collector failure, timeout, or a 0-article result it falls back to model-assisted search.
+6. It runs `claude -p` or `codex exec --search` with the `daily-news-picker` instructions; when the candidate pool exists, the prompt
+   directs the model to use it as the primary pool (with an explicit relevance check for `engine: naver-api` entries)
    and to spend effort on selection, verification, and gap-filling instead of raw collection.
-   The prompt is delivered via **stdin** (`codex exec -` + `-RedirectStandardInput prompt.txt`), never as an argv string:
+   The prompt is delivered via **stdin** (`-RedirectStandardInput prompt.txt`), never as a multiline argv string.
+   For Codex, `codex exec -` is required:
    the npm `.cmd` shim truncates argv at the first newline, which silently delivered only the prompt's first line
    in every run during 2026-07-14~17 and caused three consecutive daily failures once the read-only sandbox landed.
-7. If Codex fails or writes an empty report, the runner removes partial `md/html` outputs and records a categorized failure summary.
-8. It converts the validated Markdown into an HTML file.
-9. Before downstream ingest, the runner reads the Codex `DAILY_NEWS_VERIFIED_CANDIDATES` marker. Each entry must
+7. It repairs and validates the report, retrying within the configured attempt budget on invalid output. Each main-list
+   article needs its own absolute HTTP(S) URL; a reference-section URL cannot cover a missing article URL.
+   A main list cannot contain both articles and a no-article declaration. Final report-validation failure stops before
+   candidate promotion, DB ingest, and site publication; it must not be repaired by silently deleting articles.
+8. Before downstream ingest, the runner reads the model's `DAILY_NEWS_VERIFIED_CANDIDATES` marker. Each entry must
    carry an exact candidate URL, `verified: true`, `publication_eligible: true`, and a concrete body-evidence
    `verification_basis`. The runner writes `verified_collected_articles.json`, strips the internal marker from the
    public Markdown, and keeps the raw `collected_articles.json` unchanged. Missing or malformed markers fail closed;
    candidates remain private and the run records `PARTIAL [VERIFICATION]` when the marker cannot be processed.
+9. It converts the validated, marker-stripped Markdown into HTML. Plain article URLs and Markdown links become
+   clickable anchors, with title and URL on separate lines and escaped HTML text. URL syntax validation and rendering
+   do not replace actual article-body/source checks.
 10. It feeds the downstream organizer (`~/.codex/skills/edu-news-organizer/scripts/newsdb.py`): briefing md first,
    then the verified candidate JSON (or the raw private pool when no promotion occurred), then same-story grouping,
    then a premium HTML digest (`교육뉴스 다이제스트.html`, Incheon Education CI design) saved next to the briefing.
    Output goes to `organizer-ingest.log`; required downstream or verification failures are surfaced as non-zero.
+
+This improvement keeps that `edu-news-organizer` contract: briefing → candidate JSON → group → digest → existing
+site publication. The raw candidate pool is preserved separately from promotion output. Same-story grouping,
+three-section layout, and responsive grid continue to be owned by the organizer and are not redesigned here.
 
 ## Safety Notes
 
 - `--dangerously-bypass-approvals-and-sandbox` is no longer implicit in the runner.
 - Enable that behavior only when you explicitly pass `-DangerouslyBypassApprovalsAndSandbox`.
 - Re-register the Windows task after changing this flag so the scheduled action matches the intended trust level.
+- Claude uses `--tools "Read,Glob,Grep,WebSearch,WebFetch"` to restrict built-in tool availability and the same
+  `--allowedTools` list to permit those tools without prompting, together with `--permission-mode dontAsk`.
+  `--allowedTools` alone is not a tool-availability restriction; `bypassPermissions` is no longer used by this runner.
+- `--safe-mode` disables inherited customization, installed plugins, hooks, MCP, CLAUDE.md, and skills for that Claude
+  invocation; the runner supplies the task instructions explicitly. `--strict-mcp-config` with an empty
+  `--mcp-config '{"mcpServers":{}}'` also prevents loading configured MCP servers. Existing authentication is reused;
+  global settings and credential files are not rewritten or copied.
+- The runner adds only the `daily-news-picker` skill root with `--add-dir` so safe-mode file tools can read its `SKILL.md` and references; it does not add the whole user home directory.
+- These are the revised execution settings, not evidence of a completed normal run. Functional tests and actual
+  collection → verification → organizer → site confirmation are deferred to the normal 2026-11-04 09:00 run,
+  per the user's instruction. See [tests/smoke.md](../tests/smoke.md) for the pending checks.
 
 ## Scheduler
 
