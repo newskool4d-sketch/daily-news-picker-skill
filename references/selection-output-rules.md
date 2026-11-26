@@ -71,13 +71,13 @@ permission. This filtering must not replace or redesign the existing same-story 
 or responsive grid.
 
 Keep the `edu-news-organizer` connection and its ingest order: briefing Markdown first, then the verified
-candidate JSON (or the private raw pool when promotion produced no derived file). Preserve the original
+candidate JSON. Pass the date and the main article blocks in `selected-briefing.md` to the briefing importer. Preserve the original
 `collected_articles.json` separately; report validation must not reduce that audit pool to the final article list.
 
 When the scheduled runner is used, report-body candidates promoted from the collector must also be listed in the
 runner's `DAILY_NEWS_VERIFIED_CANDIDATES` JSON marker with the exact `original_url`, `verified: true`,
 `publication_eligible: true`, and a concrete `verification_basis`. The runner strips this internal marker before
-public output and preserves the raw collector JSON separately from the verified derived JSON.
+public output and preserves the raw collector JSON separately from the verified derived JSON. Keep the `■` prefix for main-list articles. In the summary and references, use ordinary bullets so the organizer can also read the full Markdown safely when it is imported manually. A missing or broken verification marker or a disagreement with the selected candidate URLs stops publication. For a zero-article report, retain one empty verification array and the domain audit. Incomplete searches must be reported as `수집 미완료` with the affected domains.
 
 Default structure:
 

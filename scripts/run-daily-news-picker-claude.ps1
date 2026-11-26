@@ -45,9 +45,6 @@ if ($EnablePublicPush -and [string]::IsNullOrWhiteSpace($SiteDir)) {
     throw "공개 배포를 켜려면 -SiteDir를 지정하거나 EDU_NEWS_SITE_DIR 환경변수를 설정하세요."
 }
 
-$env:EDU_NEWS_SITE_DIR = $SiteDir
-$env:EDU_NEWS_SITE_PUSH = if ($EnablePublicPush) { "1" } else { "0" }
-
 if ($CollectionTime -lt [timespan]::Zero -or $CollectionTime -ge [timespan]::FromDays(1)) {
     throw "CollectionTime은 00:00 이상 24:00 미만이어야 합니다: $CollectionTime"
 }
@@ -280,7 +277,7 @@ function Convert-MarkdownToHtmlDocument {
         [string]$Title
     )
 
-    $markdown = Get-Content $MarkdownPath -Raw -Encoding UTF8
+    $markdown = Get-Content -LiteralPath $MarkdownPath -Raw -Encoding UTF8
 
     $escaped = (@([regex]::Split($markdown, '\r?\n') | ForEach-Object { ConvertTo-ReportHtmlInline -Text $_ }) -join "`n")
     $escaped = $escaped -replace '(?m)^### (.+)$', '<h3>$1</h3>'
@@ -553,7 +550,7 @@ function Get-PreferredGeneratedFile {
 function Remove-IfExists {
     param([string]$Path)
 
-    if ($Path -and (Test-Path $Path)) {
+    if ($Path -and (Test-Path -LiteralPath $Path)) {
         Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
     }
 }
@@ -561,11 +558,11 @@ function Remove-IfExists {
 function Test-NonEmptyFile {
     param([string]$Path)
 
-    if (-not (Test-Path $Path)) {
+    if (-not (Test-Path -LiteralPath $Path)) {
         return $false
     }
 
-    $item = Get-Item -Path $Path -ErrorAction SilentlyContinue
+    $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
     return ($item -and $item.Length -gt 0)
 }
 
@@ -576,7 +573,7 @@ function Repair-MarkdownReport {
         return
     }
 
-    $content = Get-Content -Path $Path -Raw -Encoding UTF8
+    $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
     $normalized = ($content -replace "^\uFEFF", "").Trim()
     if ([string]::IsNullOrWhiteSpace($normalized)) {
         return
@@ -631,24 +628,27 @@ function Repair-MarkdownReport {
             [void]$lines.Add($line)
         }
 
+        $reservedHeadings = @('핵심 요약', '제외 또는 참고', '검증 메모')
+        $insideReserved = $false
         $firstArticleIndex = -1
         for ($index = 0; $index -lt $lines.Count; $index++) {
-            if ($lines[$index] -match '^■\s+.+\s+-\s+.+$') {
+            if ($lines[$index] -match '^##\s+(.+?)\s*$') {
+                $insideReserved = $Matches[1].Trim() -in $reservedHeadings
+            } elseif ($lines[$index] -match '^#{3,6}\s+(핵심 요약|제외 또는 참고|검증 메모)\s*$') {
+                $insideReserved = $true
+            } elseif (-not $insideReserved -and $lines[$index] -match '^■\s+.+\s+-\s+.+$') {
                 $firstArticleIndex = $index
                 break
             }
         }
 
         if ($firstArticleIndex -ge 0) {
-            $reservedHeadings = @('핵심 요약', '주요 언론보도', '제외 또는 참고', '검증 메모')
             $firstCategoryHeadingIndex = -1
             for ($index = $firstArticleIndex - 1; $index -ge 0; $index--) {
                 if ($lines[$index] -match '^##\s+(.+?)\s*$') {
                     $heading = $Matches[1].Trim()
-                    if ($heading -notin $reservedHeadings) {
-                        $firstCategoryHeadingIndex = $index
-                        break
-                    }
+                    if ($heading -notin $reservedHeadings) { $firstCategoryHeadingIndex = $index }
+                    break
                 }
             }
 
@@ -686,24 +686,32 @@ function Get-MarkdownReportValidationFailures {
         return @('non_empty_file')
     }
 
-    $content = Get-Content -Path $Path -Raw -Encoding UTF8
+    $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
     $trimmed = $content.TrimStart()
     $failures = [System.Collections.Generic.List[string]]::new()
     if (-not ($trimmed.StartsWith("# 인천교육청 언론보도 현황") -or ($trimmed -match '^20\d{2}\.\s*\d{1,2}\.\s*\d{1,2}\.'))) {
         [void]$failures.Add('title')
+    }
+    # Check every date the downstream parser can select, including the legacy opening line.
+    $datePattern = '(?m)^[ \t]*(?:(?:[-*][ \t]*)?보고일[ \t]*:[ \t]*|(?![^\r\n]*보고일)(?=[^\r\n]*주요 언론보도 현황입니다))(?<year>20\d{2})[ \t]*[-./][ \t]*(?<month>\d{1,2})[ \t]*[-./][ \t]*(?<day>\d{1,2})(?!\d)'
+    $dates = [regex]::Matches($content, $datePattern)
+    if ($dates.Count -eq 0) { [void]$failures.Add('report_date') }
+    foreach ($date in $dates) {
+        $isoDate = '{0}-{1:D2}-{2:D2}' -f $date.Groups['year'].Value, [int]$date.Groups['month'].Value, [int]$date.Groups['day'].Value
+        if ($isoDate -ne $reportDateDisplay) { [void]$failures.Add('report_date'); break }
     }
     $mainSections = [regex]::Matches($content, '(?m)^##[ \t]+주요 언론보도[ \t]*\r?$')
     if ($mainSections.Count -ne 1) {
         [void]$failures.Add('main_section')
     } else {
         $mainContent = $content.Substring($mainSections[0].Index + $mainSections[0].Length)
-        $nextSection = [regex]::Match($mainContent, '(?m)^##(?:[ \t]+|$)')
+        $nextSection = [regex]::Match($mainContent, '(?m)^(?:#{1,2}(?:[ \t]+|$)|#{3,6}[ \t]+(?:핵심 요약|제외 또는 참고|검증 메모)[ \t]*\r?$)')
         if ($nextSection.Success) {
             $mainContent = $mainContent.Substring(0, $nextSection.Index)
         }
         $articles = [regex]::Matches($mainContent, '(?m)^■[^\r\n]*')
         $noArticles = $mainContent -match '확인된 유의미 기사 없음'
-        if ($articles.Count -eq 0 -and -not $noArticles) {
+        if ($articles.Count -eq 0 -and -not $noArticles -and $mainContent -notmatch '(?m)^(?:[-*] )?수집 미완료[ \t]*(?:\r?$|[:(])') {
             [void]$failures.Add('article_list')
         }
         if ($articles.Count -gt 0 -and $noArticles) {
@@ -745,27 +753,6 @@ function Test-IsMarkdownReport {
     param([string]$Path)
 
     return (@(Get-MarkdownReportValidationFailures -Path $Path).Count -eq 0)
-}
-
-function Get-GeneratedReportMarkdown {
-    param([string[]]$SearchDirs)
-
-    foreach ($searchDir in $SearchDirs) {
-        if (-not (Test-Path $searchDir)) {
-            continue
-        }
-
-        $candidate = Get-ChildItem -Path $searchDir -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending |
-            Where-Object { Test-IsMarkdownReport -Path $_.FullName } |
-            Select-Object -First 1
-
-        if ($candidate) {
-            return $candidate
-        }
-    }
-
-    return $null
 }
 
 function Set-GitBashEnvironment {
@@ -861,9 +848,15 @@ function Get-RunFailureSummary {
     return ("{0} (exit code: {1})" -f $detail, $ExitCode)
 }
 
+. (Join-Path $PSScriptRoot 'report-lifecycle.ps1')
+
 $reportDate = $ReportDate.Date
 $reportDateStamp = $reportDate.ToString("yyyyMMdd")
 $reportDateDisplay = $reportDate.ToString("yyyy-MM-dd")
+if ($DryRun) {
+    Write-Log "DryRun: 보고일 $reportDateDisplay, 수집 마감 $CollectionTime, 출력 $BasePath"
+    exit 0
+}
 $windowStart = (Get-PreviousBusinessDay -Date $reportDate).Date.Add($CollectionTime)
 $windowEnd = $reportDate.Date.Add($CollectionTime)
 $windowStartDisplay = $windowStart.ToString("yyyy-MM-dd HH:mm")
@@ -879,40 +872,14 @@ if (-not [string]::IsNullOrWhiteSpace($ValidateReportPath)) {
         Write-Output ("REPORT_VALIDATION: FAIL [{0}]" -f ($validationFailures -join ','))
         exit 2
     }
-    if (-not [string]::IsNullOrWhiteSpace($ValidationHtmlOutputPath)) {
-        $validationHtmlParent = Split-Path -Parent $ValidationHtmlOutputPath
-        if ($validationHtmlParent -and -not (Test-Path -LiteralPath $validationHtmlParent)) {
-            New-Item -ItemType Directory -Force -Path $validationHtmlParent | Out-Null
-        }
-        Convert-MarkdownToHtmlDocument `
-            -MarkdownPath $ValidateReportPath `
-            -HtmlPath $ValidationHtmlOutputPath `
-            -Title ("인천교육청 언론보도 현황({0})" -f $reportDateStamp)
-        if (-not (Test-NonEmptyFile -Path $ValidationHtmlOutputPath)) {
-            throw "검증된 Markdown의 HTML 변환 결과가 비어 있습니다: $ValidationHtmlOutputPath"
-        }
-        Write-Output ("REPORT_HTML: {0}" -f $ValidationHtmlOutputPath)
+    try {
+        Write-ValidatedPreview $ValidateReportPath $ValidationHtmlOutputPath
+    } catch {
+        Write-Output "REPORT_VALIDATION: FAIL [$($_.Exception.Message)]"
+        exit 2
     }
     Write-Output "REPORT_VALIDATION: PASS"
     exit 0
-}
-
-$folderName = "인천교육청 언론보도 현황($reportDateStamp)"
-$reportDir = Join-Path $BasePath $folderName
-$markdownPath = Join-Path $reportDir "인천교육청 언론보도 현황.md"
-$htmlPath = Join-Path $reportDir "인천교육청 언론보도 현황.html"
-$persistedCollectedJsonPath = Join-Path $reportDir "collected_articles.json"
-$persistedVerifiedCollectedJsonPath = Join-Path $reportDir "verified_collected_articles.json"
-$verificationManifestPath = Join-Path $reportDir "verification-manifest.json"
-$verificationLogPath = Join-Path $reportDir "verification-promotion.log"
-$logPath = Join-Path $reportDir "run.log"
-$engineWorkRoot = Join-Path ([System.IO.Path]::GetTempPath()) "DailyNewsPickerClaudeWork"
-# 고정 작업 폴더: 날짜별 폴더는 신뢰 목록에 매일 1건씩 쌓여 승인/ACL 갱신을 비대화시킴
-$engineWorkDir = Join-Path $engineWorkRoot "current"
-$verifiedCollectedJsonPath = Join-Path $engineWorkDir "verified_collected_articles.json"
-
-if (-not (Test-Path $BasePath)) {
-    New-Item -ItemType Directory -Force -Path $BasePath | Out-Null
 }
 
 if (-not (Test-IsBusinessDay -Date $reportDate) -and -not $Force) {
@@ -920,19 +887,10 @@ if (-not (Test-IsBusinessDay -Date $reportDate) -and -not $Force) {
     exit 0
 }
 
-if ((Test-Path $markdownPath) -and (Test-Path $htmlPath) -and -not $Force) {
-    Write-Log "이미 오늘 결과가 존재합니다: $reportDir"
-    exit 0
-}
-
-New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
-New-Item -ItemType Directory -Force -Path $engineWorkDir | Out-Null
-Remove-Item -Path (Join-Path $engineWorkDir "last-message.md") -Force -ErrorAction SilentlyContinue
-Remove-Item -Path (Join-Path $engineWorkDir "collected_articles.json") -Force -ErrorAction SilentlyContinue
-Remove-Item -Path (Join-Path $engineWorkDir "verified_collected_articles.json") -Force -ErrorAction SilentlyContinue
-
-$prompt = @"
-Read the file at C:\Users\홍주형\.codex\skills\daily-news-picker\SKILL.md and follow it exactly as your
+function New-EngineReport {
+    $skillFile = Join-Path (Split-Path $PSScriptRoot) 'SKILL.md'
+    $prompt = @"
+Read the file at $skillFile and follow it exactly as your
 operating instructions for this run, including its linked references/institution-scope.md and
 references/media-sources.md (open both before selecting or excluding any candidate).
 
@@ -967,7 +925,7 @@ Apply these rules:
 - Ranking controls output order only. Do not omit relevant lower-priority routine items, affiliated-institution items, library items, school-level items, or local issue articles solely because they are not top priority.
 - If several outlets carry materially the same story, keep one representative external media article for that same event, but do not merge separate issues or institutions.
 - In the main list, use this sharing format for each item: `■ article title - outlet` followed by the URL on the next line.
-- 보고서에는 "## 주요 언론보도" 헤더를 정확히 한 번 사용한다. 다른 어떤 "##" 레벨 헤더도 만들지 않는다.
+- 보고서에는 "## 주요 언론보도" 헤더를 정확히 한 번 사용한다. "## 핵심 요약", "## 제외 또는 참고", "## 검증 메모"는 별도 절로 쓸 수 있다.
 - 세부 분류 제목을 사용할 경우에는 반드시 "## 주요 언론보도" 절 안에서 "###" 헤더로만 작성한다 ("##"로 쓰지 않는다).
 - If no meaningful article is found, still produce the full report structure and say `확인된 유의미 기사 없음`
 - Do not ask follow-up questions
@@ -982,6 +940,15 @@ Apply these rules:
 
 Write the final answer in Korean as a complete Markdown report ready to save directly to disk.
 The first line must be `# 인천교육청 언론보도 현황`.
+Put any "## 검증 메모" section before both machine blocks; nothing may appear between or after them.
+Provide the outlet check log immediately before the verification block:
+<!-- DAILY_NEWS_SOURCE_CHECKS
+{"incheonin.com":"checked_found","incheontoday.com":"checked_empty"}
+DAILY_NEWS_SOURCE_CHECKS -->
+Use all required domains in references/media-sources.md. Record checked_found for a completed search with hits,
+checked_empty for a completed search without hits, or failed for a failed or unfinished search. The example contains
+only two domains. Use the collector's source_checks when available. Search unchecked or failed domains individually;
+the marker records completed searches and failures. An incidental article match is not a domain check.
 For every collector candidate that you include after checking its article body, append this exact machine-readable
 block at the very end of the report (use [] when no collector candidate is verified for publication):
 <!-- DAILY_NEWS_VERIFIED_CANDIDATES
@@ -992,380 +959,127 @@ article body was checked and the candidate is included in the report. The verifi
 body evidence, not just repeat the title or say "관련 있음".
 "@
 
-$promptPath = Join-Path $reportDir "prompt.txt"
-[System.IO.File]::WriteAllText($promptPath, $prompt, $script:Utf8NoBom)
+    $prompt += Get-CandidatePoolInstructions $EngineWorkDir
+    $promptPath = Join-Path $reportDir 'prompt.txt'
+    [IO.File]::WriteAllText($promptPath, $prompt, $script:Utf8NoBom)
 
-if ($DryRun) {
-    Write-Log "DryRun 모드입니다."
-    Write-Log "저장 폴더: $reportDir"
-    Write-Log "Markdown: $markdownPath"
-    Write-Log "HTML: $htmlPath"
-    Write-Log "Prompt: $promptPath"
-    Write-Log "엔진: $ClaudeCommand -model $Model (DryRun에서는 실행하지 않음)"
-    Write-Log "1차 수집기: $(Join-Path $PSScriptRoot 'collect_news_rss.py') (DryRun에서는 실행하지 않음)"
-    exit 0
-}
+    # 프롬프트는 argv가 아니라 stdin으로 전달한다 (Codex 러너에서 겪은 argv 개행 절단 사고를
+    # 답습하지 않기 위한 예방 조치 — claude -p도 동일 패턴 유지).
+    # 임시 cwd 밖의 SKILL.md·references만 읽도록 현재 스킬 루트를 좁게 추가한다.
+    $skillRoot = Split-Path -Parent $PSScriptRoot
+    $argList = @(
+        "-p",
+        "--output-format", "text",
+        "--model", $Model,
+        "--safe-mode",
+        "--add-dir", $skillRoot,
+        "--tools", "Read,Glob,Grep,WebSearch,WebFetch",
+        "--allowedTools", "Read,Glob,Grep,WebSearch,WebFetch",
+        "--permission-mode", "dontAsk",
+        "--strict-mcp-config",
+        "--mcp-config", '{"mcpServers":{}}'
+    )
 
-# ---- 1차 수집: Google News RSS(+네이버 API 보강) 수집기 ----
-$collectedJsonPath = Join-Path $engineWorkDir "collected_articles.json"
-$collectorPath = Join-Path $PSScriptRoot "collect_news_rss.py"
-$collectorUsed = $false
-$collectorCount = 0
-if (Test-Path $collectorPath) {
-    Write-RunLog -Path $logPath -Message "1차 수집기 실행: Google News RSS(+네이버 보강)"
-    $collectorStdout = Join-Path $reportDir "collector.stdout.log"
-    $collectorStderr = Join-Path $reportDir "collector.stderr.log"
-    $prevPyEnc = $env:PYTHONIOENCODING
-    $env:PYTHONIOENCODING = "utf-8"
+    $lastMessagePath = Join-Path $engineWorkDir "last-message.md"
+    $stderrPath = Join-Path $reportDir "claude.stderr.log"
+    $process = $null
+    $timedOut = $false
+    $lastValidationFailures = @()
+
+    Write-RunLog -Path $logPath -Message ("설정: engine=claude, model={0}, output={1}, engineWorkDir={2}, timeoutSeconds={3}" -f $Model, $reportDir, $engineWorkDir, $ClaudeTimeoutSeconds)
+
+    $gitBashPath = Set-GitBashEnvironment
+    if ($gitBashPath) {
+        Write-RunLog -Path $logPath -Message ("Git Bash 경로 고정: {0}" -f $gitBashPath)
+    } else {
+        Write-RunLog -Path $logPath -Message "Git Bash 경로를 찾지 못했습니다. 현재 PATH를 그대로 사용합니다."
+    }
+
     try {
-        $collectorArgs = @($collectorPath, "--start", $windowStartDisplay, "--end", $windowEndDisplay, "--out-dir", $engineWorkDir)
-        $quotedCollectorArgs = $collectorArgs | ForEach-Object {
-            if ($_ -match '\s|"') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
-        }
-        $collectorProcess = Start-Process -FilePath $PythonCommand -ArgumentList ([string]::Join(' ', $quotedCollectorArgs)) -RedirectStandardOutput $collectorStdout -RedirectStandardError $collectorStderr -PassThru -NoNewWindow
-        if (-not $collectorProcess.WaitForExit($CollectorTimeoutSeconds * 1000)) {
-            try { $collectorProcess.Kill($true) } catch { Stop-Process -Id $collectorProcess.Id -Force -ErrorAction SilentlyContinue }
-            try {
-                if ($collectorProcess.WaitForExit(5000)) {
-                    $collectorProcess.WaitForExit()
-                }
-            } catch {
-            }
-            Write-RunLog -Path $logPath -Message "수집기 시간 초과 — Claude 자체 검색으로 폴백합니다."
-        } elseif ($collectorProcess.ExitCode -ne 0) {
-            Write-RunLog -Path $logPath -Message ("수집기 실패(exit {0}) — Claude 자체 검색으로 폴백합니다." -f $collectorProcess.ExitCode)
-        } elseif (Test-NonEmptyFile -Path $collectedJsonPath) {
-            $pool = Get-Content -Path $collectedJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($pool.article_count -ge 1) {
-                $collectorUsed = $true
-                $collectorCount = $pool.article_count
-                Copy-Item -Path $collectedJsonPath -Destination $persistedCollectedJsonPath -Force
-                Write-RunLog -Path $logPath -Message ("1차 수집 완료: {0}건 (수집 실패 쿼리 {1}건)" -f $pool.article_count, @($pool.failures).Count)
+        $quotedArgs = $argList | ForEach-Object {
+            if ($_ -match '\s|"') {
+                '"' + ($_ -replace '"', '\"') + '"'
             } else {
-                Write-RunLog -Path $logPath -Message "1차 수집 0건 — Claude 자체 검색으로 폴백합니다."
+                $_
             }
-        } else {
-            Write-RunLog -Path $logPath -Message "수집 결과 파일이 없습니다 — Claude 자체 검색으로 폴백합니다."
         }
-    } catch {
-        Write-RunLog -Path $logPath -Message ("수집기 실행 오류: {0} — Claude 자체 검색으로 폴백합니다." -f $_.Exception.Message)
-    } finally {
-        $env:PYTHONIOENCODING = $prevPyEnc
-        foreach ($tempLog in @($collectorStdout, $collectorStderr)) {
-            if (Test-Path $tempLog) {
+        $argumentString = [string]::Join(' ', $quotedArgs)
+
+        $reportReady = $false
+        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            Write-RunLog -Path $logPath -Message ("Claude 실행을 시작합니다. (시도 {0}/{1})" -f $attempt, $MaxAttempts)
+            $timedOut = $false
+            Remove-IfExists -Path $lastMessagePath
+            $process = Start-Process -FilePath $ClaudeCommand -ArgumentList $argumentString -RedirectStandardInput $promptPath -RedirectStandardOutput $lastMessagePath -RedirectStandardError $stderrPath -PassThru -NoNewWindow -WorkingDirectory $engineWorkDir
+            if (-not $process.WaitForExit($ClaudeTimeoutSeconds * 1000)) {
+                $timedOut = $true
                 try {
-                    $tempLogText = [System.IO.File]::ReadAllText($tempLog, [System.Text.Encoding]::UTF8)
-                    if ($tempLogText) {
-                        [System.IO.File]::AppendAllText($logPath, $tempLogText, $script:Utf8NoBom)
-                    }
+                    $process.Kill($true)
                 } catch {
-                    Write-RunLog -Path $logPath -Message ("수집기 임시 로그 읽기 실패(비치명): {0}" -f $_.Exception.Message)
-                } finally {
-                    Remove-Item -Path $tempLog -Force -ErrorAction SilentlyContinue
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
                 }
+                throw "Claude 실행 시간 제한 초과"
             }
-        }
-    }
-} else {
-    Write-RunLog -Path $logPath -Message "수집기 스크립트가 없습니다 — Claude 자체 검색으로 진행합니다."
-}
 
-if (-not $collectorUsed) {
-    Remove-Item -Path $collectedJsonPath -Force -ErrorAction SilentlyContinue
-} else {
-    $prompt += @"
-
-Pre-collected candidate pool: your working directory contains ``collected_articles.json`` with $collectorCount candidate articles,
-produced by the skill's deterministic collector (Google News RSS primary + Naver API supplement) for exactly the check window above,
-with original media URLs already resolved. Read it with the Read tool.
-- Use it as the primary candidate pool. Do not redo broad first-pass collection from scratch.
-- Verify the relevance of every entry before including it. Entries with ``"engine": "naver-api"`` are unfiltered keyword matches and require an explicit relevance check.
-- Use ``relevance_hint`` only as triage metadata, never as the final decision. ``likely_irrelevant`` means the title has an Incheon location or clear commercial context but no education subject; ``needs_review`` preserves exact school names and low-context titles for body verification. Collector candidates carry ``publication_eligible: false`` by default; do not treat ``likely_relevant`` or ``needs_review`` as permission to publish before article-body verification.
-- Check the ``relevance_reasons``, ``location_hits``, ``education_subject_hits``, and ``student_story_hits`` fields and state a concrete inclusion relationship in your reasoning before selecting school/student items.
-- Check the ``failures`` field: queries listed there may be under-collected, so supplement those specific queries with targeted web searches per the skill's recipes.
-- Still apply the skill's selection, deduplication, ranking, verification, and output rules to the pool.
-- The file path is: $collectedJsonPath
-"@
-    [System.IO.File]::WriteAllText($promptPath, $prompt, $script:Utf8NoBom)
-}
-
-# 프롬프트는 argv가 아니라 stdin으로 전달한다 (Codex 러너에서 겪은 argv 개행 절단 사고를
-# 답습하지 않기 위한 예방 조치 — claude -p도 동일 패턴 유지).
-# 임시 cwd 밖의 SKILL.md·references만 읽도록 현재 스킬 루트를 좁게 추가한다.
-$skillRoot = Split-Path -Parent $PSScriptRoot
-$argList = @(
-    "-p",
-    "--output-format", "text",
-    "--model", $Model,
-    "--safe-mode",
-    "--add-dir", $skillRoot,
-    "--tools", "Read,Glob,Grep,WebSearch,WebFetch",
-    "--allowedTools", "Read,Glob,Grep,WebSearch,WebFetch",
-    "--permission-mode", "dontAsk",
-    "--strict-mcp-config",
-    "--mcp-config", '{"mcpServers":{}}'
-)
-
-$lastMessagePath = Join-Path $engineWorkDir "last-message.md"
-$stderrPath = Join-Path $reportDir "claude.stderr.log"
-$generatedMarkdown = $null
-$generatedHtml = $null
-$process = $null
-$timedOut = $false
-$verificationFailed = $false
-$verifiedCandidateAvailable = $false
-$lastValidationFailures = @()
-
-Write-RunLog -Path $logPath -Message "STATUS: STARTED"
-Write-RunLog -Path $logPath -Message ("설정: engine=claude, model={0}, output={1}, engineWorkDir={2}, timeoutSeconds={3}" -f $Model, $reportDir, $engineWorkDir, $ClaudeTimeoutSeconds)
-
-$gitBashPath = Set-GitBashEnvironment
-if ($gitBashPath) {
-    Write-RunLog -Path $logPath -Message ("Git Bash 경로 고정: {0}" -f $gitBashPath)
-} else {
-    Write-RunLog -Path $logPath -Message "Git Bash 경로를 찾지 못했습니다. 현재 PATH를 그대로 사용합니다."
-}
-
-try {
-    $quotedArgs = $argList | ForEach-Object {
-        if ($_ -match '\s|"') {
-            '"' + ($_ -replace '"', '\"') + '"'
-        } else {
-            $_
-        }
-    }
-    $argumentString = [string]::Join(' ', $quotedArgs)
-
-    $reportReady = $false
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        Write-RunLog -Path $logPath -Message ("Claude 실행을 시작합니다. (시도 {0}/{1})" -f $attempt, $MaxAttempts)
-        $timedOut = $false
-        Remove-IfExists -Path $lastMessagePath
-        $process = Start-Process -FilePath $ClaudeCommand -ArgumentList $argumentString -RedirectStandardInput $promptPath -RedirectStandardOutput $lastMessagePath -RedirectStandardError $stderrPath -PassThru -NoNewWindow -WorkingDirectory $engineWorkDir
-        if (-not $process.WaitForExit($ClaudeTimeoutSeconds * 1000)) {
-            $timedOut = $true
-            try {
-                $process.Kill($true)
-            } catch {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            if (Test-Path $stderrPath) {
+                [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($stderrPath, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
             }
-            throw "Claude 실행 시간 제한 초과"
-        }
 
-        if (Test-Path $stderrPath) {
-            [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($stderrPath, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
-        }
-
-        $generatedMarkdown = if (Test-NonEmptyFile -Path $lastMessagePath) { Get-Item -LiteralPath $lastMessagePath } else { $null }
-        $generatedHtml = $null
-
-        if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $markdownPath) {
-            Copy-Item -Path $generatedMarkdown.FullName -Destination $markdownPath -Force
-        }
-
-        if (Test-NonEmptyFile -Path $markdownPath) {
-            Repair-MarkdownReport -Path $markdownPath
-        }
-
-        if (-not (Test-IsMarkdownReport -Path $markdownPath)) {
-            $generatedReportMarkdown = Get-GeneratedReportMarkdown -SearchDirs @($reportDir, $engineWorkDir)
-            if ($generatedReportMarkdown -and $generatedReportMarkdown.FullName -ne $markdownPath) {
-                Copy-Item -Path $generatedReportMarkdown.FullName -Destination $markdownPath -Force
+            if (Test-NonEmptyFile $lastMessagePath) {
+                Copy-Item -LiteralPath $lastMessagePath -Destination $markdownPath -Force
+                Repair-MarkdownReport -Path $markdownPath
             }
-        }
-
-        if (Test-NonEmptyFile -Path $markdownPath) {
-            Repair-MarkdownReport -Path $markdownPath
-        }
-
-        $lastValidationFailures = @(Get-MarkdownReportValidationFailures -Path $markdownPath)
-        if (($process.ExitCode -eq 0) -and ($lastValidationFailures.Count -eq 0)) {
-            $reportReady = $true
-            break
-        }
-
-        if ($attempt -lt $MaxAttempts) {
-            $retryReason = if ($process.ExitCode -ne 0) {
-                "exit code $($process.ExitCode)"
-            } else {
-                "보고서 검증 실패: $($lastValidationFailures -join ', ')"
+            $lastValidationFailures = @(Get-MarkdownReportValidationFailures -Path $markdownPath)
+            if (($process.ExitCode -eq 0) -and ($lastValidationFailures.Count -eq 0)) {
+                $reportReady = $true
+                break
             }
-            if (($process.ExitCode -eq 0) -and ($lastValidationFailures.Count -gt 0)) {
-                $retryPrompt = $prompt + @"
+
+            if ($attempt -lt $MaxAttempts) {
+                $retryReason = if ($process.ExitCode -ne 0) {
+                    "exit code $($process.ExitCode)"
+                } else {
+                    "보고서 검증 실패: $($lastValidationFailures -join ', ')"
+                }
+                if (($process.ExitCode -eq 0) -and ($lastValidationFailures.Count -gt 0)) {
+                    $retryPrompt = $prompt + @"
 
 이전 출력 검증 실패 항목: $($lastValidationFailures -join ', ')
-위 항목을 모두 수정한 전체 보고서를 다시 반환하세요. 특히 요구된 제목과 "## 주요 언론보도" 헤더 규칙(다른 "##" 헤더 금지, 세부 분류는 "###"만 사용)과 점검 범위를 정확히 유지하세요.
+요구된 제목, 보고일과 점검 범위를 확인하고 전체 보고서를 다시 반환하세요. 주요 언론보도의 세부 분류는 ###를 사용하세요.
 "@
-                [System.IO.File]::WriteAllText($promptPath, $retryPrompt, $script:Utf8NoBom)
-            }
-            Write-RunLog -Path $logPath -Message ("시도 {0} 실패({1}). 부분 산출물 제거 후 재시도합니다." -f $attempt, $retryReason)
-            Remove-IfExists -Path $markdownPath
-            Remove-IfExists -Path $htmlPath
-            if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $lastMessagePath) { Remove-IfExists -Path $generatedMarkdown.FullName }
-            Start-Sleep -Seconds 15
-        }
-    }
-
-    if (-not $reportReady) {
-        if ($process -and $process.ExitCode -ne 0) {
-            throw "Claude 실행 실패"
-        }
-        if (-not (Test-NonEmptyFile -Path $markdownPath)) {
-            throw "Markdown 결과가 비어 있거나 생성되지 않았습니다."
-        }
-        throw "Markdown 결과가 보고서 본문 형식이 아닙니다."
-    }
-
-    # ---- 본문 검증 후보 자동 승격 ----
-    $promotionScript = Join-Path $PSScriptRoot "promote_verified_candidates.py"
-    $candidateInputAvailable = $collectorUsed -and (Test-NonEmptyFile -Path $collectedJsonPath)
-    $promotionArgs = @(
-        $promotionScript,
-        "--report", $markdownPath,
-        "--output", $verifiedCollectedJsonPath,
-        "--manifest-output", $verificationManifestPath
-    )
-    if ($candidateInputAvailable) {
-        $promotionArgs = @(
-            $promotionScript,
-            "--input", $collectedJsonPath,
-            "--report", $markdownPath,
-            "--output", $verifiedCollectedJsonPath,
-            "--manifest-output", $verificationManifestPath
-        )
-    }
-    try {
-        Remove-IfExists -Path $verificationLogPath
-        & $PythonCommand @promotionArgs *> $verificationLogPath
-        $promotionExitCode = $LASTEXITCODE
-        if (($promotionExitCode -ne 0) -or (-not (Test-NonEmptyFile -Path $verifiedCollectedJsonPath))) {
-            $verificationFailed = $true
-            Write-RunLog -Path $logPath -Message ("본문 검증 후보 승격 실패(exit {0}) — 원본 후보는 비공개로 유지합니다: {1}" -f $promotionExitCode, $verificationLogPath)
-        } else {
-            Copy-Item -Path $verifiedCollectedJsonPath -Destination $persistedVerifiedCollectedJsonPath -Force
-            $verifiedCandidateAvailable = $candidateInputAvailable
-            $promotionSummary = Get-Content -Path $verificationLogPath -Raw -Encoding UTF8
-            Write-RunLog -Path $logPath -Message ("본문 검증 후보 승격 완료 — {0}" -f $promotionSummary.Trim())
-        }
-    } catch {
-        $verificationFailed = $true
-        Write-RunLog -Path $logPath -Message ("본문 검증 후보 승격 오류 — 원본 후보는 비공개로 유지합니다: {0}" -f $_.Exception.Message)
-    }
-
-    Convert-MarkdownToHtmlDocument -MarkdownPath $markdownPath -HtmlPath $htmlPath -Title $folderName
-
-    if (-not (Test-NonEmptyFile -Path $htmlPath)) {
-        throw "HTML 결과가 비어 있거나 생성되지 않았습니다."
-    }
-
-    # ---- 하류 자동 인제스트 (edu-news-organizer) ----
-    $downstreamFailed = $false
-    $downstreamRequired = (-not [string]::IsNullOrWhiteSpace($SiteDir)) -or $EnablePublicPush
-    $organizerScript = Join-Path $env:USERPROFILE ".codex\skills\edu-news-organizer\scripts\newsdb.py"
-    if ($SkipDownstream) {
-        Write-RunLog -Path $logPath -Message "STATUS: SKIPPED [DOWNSTREAM] -SkipDownstream 지정 — DB 인제스트·사이트 배포를 건너뜁니다(엔진 검증 전용 실행)."
-        Write-RunLog -Path $logPath -Message "생성 완료(엔진 단계까지): $reportDir"
-        exit 0
-    }
-    if (Test-Path $organizerScript) {
-        $ingestLog = Join-Path $reportDir "organizer-ingest.log"
-        Remove-IfExists -Path $ingestLog
-        try {
-            $env:PYTHONIOENCODING = "utf-8"
-            $ingestJsonPath = if ($verifiedCandidateAvailable -and (Test-NonEmptyFile -Path $persistedVerifiedCollectedJsonPath)) {
-                $persistedVerifiedCollectedJsonPath
-            } elseif (Test-NonEmptyFile -Path $collectedJsonPath) {
-                $collectedJsonPath
-            } elseif ($collectorUsed -and (Test-NonEmptyFile -Path $persistedCollectedJsonPath)) {
-                $persistedCollectedJsonPath
-            } else {
-                $null
-            }
-            Invoke-LoggedNativeCommand -Step "브리핑 인제스트" -Command $PythonCommand `
-                -Arguments @($organizerScript, "ingest", "--briefing", $markdownPath) -LogPath $ingestLog
-            if ($ingestJsonPath) {
-                Invoke-LoggedNativeCommand -Step "후보 JSON 인제스트" -Command $PythonCommand `
-                    -Arguments @($organizerScript, "ingest", "--json", $ingestJsonPath) -LogPath $ingestLog
-            }
-            Invoke-LoggedNativeCommand -Step "동일보도 묶음" -Command $PythonCommand `
-                -Arguments @($organizerScript, "group", "--date", $reportDateDisplay) -LogPath $ingestLog
-            $digestHtmlPath = Join-Path $reportDir "교육뉴스 다이제스트.html"
-            Invoke-LoggedNativeCommand -Step "HTML 다이제스트 생성" -Command $PythonCommand `
-                -Arguments @($organizerScript, "digest", "--date", $reportDateDisplay, "--format", "html", "--out", $digestHtmlPath) `
-                -LogPath $ingestLog
-            if (-not (Test-NonEmptyFile -Path $digestHtmlPath)) {
-                throw "HTML 다이제스트가 생성되지 않았습니다: $digestHtmlPath"
-            }
-            Write-RunLog -Path $logPath -Message "하류 인제스트·다이제스트 완료 (edu-news-organizer → organizer-ingest.log, 교육뉴스 다이제스트.html)"
-
-            if ($env:EDU_NEWS_SITE_DIR) {
-                $publishScript = Join-Path $env:USERPROFILE ".codex\skills\edu-news-organizer\scripts\publish_site.py"
-                $prevPythonUtf8 = $env:PYTHONUTF8
-                try {
-                    $env:PYTHONUTF8 = "1"
-                    $publishArgs = @($publishScript, "--site-dir", $env:EDU_NEWS_SITE_DIR, "--date", $reportDateDisplay)
-                    if ($env:EDU_NEWS_SITE_PUSH -eq "1") {
-                        $publishArgs += "--push"
-                    }
-                    Invoke-LoggedNativeCommand -Step "정적 사이트 게시" -Command $PythonCommand `
-                        -Arguments $publishArgs -LogPath $ingestLog
-                    $archivePath = Join-Path $env:EDU_NEWS_SITE_DIR ("archive\{0}.html" -f $reportDateDisplay)
-                    if (-not (Test-NonEmptyFile -Path $archivePath)) {
-                        throw "날짜별 공개 아카이브가 생성되지 않았습니다: $archivePath"
-                    }
-                } finally {
-                    $env:PYTHONUTF8 = $prevPythonUtf8
+                    [System.IO.File]::WriteAllText($promptPath, $retryPrompt, $script:Utf8NoBom)
                 }
-                Write-RunLog -Path $logPath -Message ("정적 사이트 배포 완료 (공개 안전본 → {0}, push={1})" -f $env:EDU_NEWS_SITE_DIR, ($env:EDU_NEWS_SITE_PUSH -eq "1"))
+                Write-RunLog -Path $logPath -Message ("시도 {0} 실패({1}). 부분 산출물 제거 후 재시도합니다." -f $attempt, $retryReason)
+                Remove-IfExists -Path $markdownPath
+                Start-Sleep -Seconds 15
             }
-        } catch {
-            $downstreamFailed = $true
-            Write-RunLog -Path $logPath -Message ("하류 처리 실패(비치명): {0}" -f $_.Exception.Message)
         }
-    } else {
-        $message = "하류 구성요소 없음: $organizerScript"
-        if ($downstreamRequired) {
-            $downstreamFailed = $true
-            Write-RunLog -Path $logPath -Message $message
-        } else {
-            Write-RunLog -Path $logPath -Message ("{0} — 로컬 브리핑만 유지합니다." -f $message)
-        }
-    }
-    if ($downstreamFailed) {
-        Write-RunLog -Path $logPath -Message "STATUS: PARTIAL [DOWNSTREAM]"
-    } elseif ($verificationFailed) {
-        Write-RunLog -Path $logPath -Message "STATUS: PARTIAL [VERIFICATION]"
-    } else {
-        Write-RunLog -Path $logPath -Message "STATUS: SUCCEEDED"
-    }
-    Write-RunLog -Path $logPath -Message "생성 완료: $reportDir"
-    if (($downstreamFailed -or $verificationFailed) -and $downstreamRequired) {
-        exit 1
-    }
-}
-catch {
-    $exitCode = if ($timedOut) { 124 } elseif ($process) { $process.ExitCode } else { -1 }
-    $category = if ($timedOut) { "timeout" } else { Get-RunFailureCategory -ExitCode $exitCode -StdErrPath $stderrPath }
-    $summary = Get-RunFailureSummary -Category $category -ExitCode $exitCode -StdErrPath $stderrPath -ValidationFailures $lastValidationFailures
 
-    Remove-IfExists -Path $markdownPath
-    Remove-IfExists -Path $htmlPath
-    if ($collectorUsed -and (Test-NonEmptyFile -Path $persistedCollectedJsonPath)) {
-        Write-RunLog -Path $logPath -Message ("수집 후보 JSON 보존: {0}" -f $persistedCollectedJsonPath)
-    } else {
-        Remove-IfExists -Path $persistedCollectedJsonPath
+        if (-not $reportReady) {
+            if ($process -and $process.ExitCode -ne 0) {
+                throw "Claude 실행 실패"
+            }
+            if (-not (Test-NonEmptyFile -Path $markdownPath)) {
+                throw "Markdown 결과가 비어 있거나 생성되지 않았습니다."
+            }
+            throw "Markdown 결과가 보고서 본문 형식이 아닙니다."
+        }
+
     }
-    Remove-IfExists -Path $persistedVerifiedCollectedJsonPath
-    Remove-IfExists -Path $verificationManifestPath
-    Remove-IfExists -Path $verificationLogPath
-    if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $lastMessagePath) {
-        Remove-IfExists -Path $generatedMarkdown.FullName
+    catch {
+        $exitCode = if ($timedOut) { 124 } elseif ($process) { $process.ExitCode } else { -1 }
+        $category = if ($timedOut) { "timeout" } else { Get-RunFailureCategory -ExitCode $exitCode -StdErrPath $stderrPath }
+        $summary = Get-RunFailureSummary -Category $category -ExitCode $exitCode -StdErrPath $stderrPath -ValidationFailures $lastValidationFailures
+
+        Write-RunLog -Path $logPath -Message ("STATUS: FAILED [{0}]" -f $category.ToUpperInvariant())
+        Write-RunLog -Path $logPath -Message ("원인: {0}" -f $summary)
+        # 원본과 달리 여기서 run.log/claude.stderr.log를 삭제하지 않는다 — 2026-08-21 실패 조사 시
+        # 로그가 이미 지워져 원인 규명이 불가능했던 문제를 재발시키지 않기 위함. 대신 report 폴더
+        # 자체를 다음 재시도 전까지 보존해 사후 분석 가능하게 한다.
+        throw "{0}. 로그: {1}" -f $summary, $logPath
     }
 
-    Write-RunLog -Path $logPath -Message ("STATUS: FAILED [{0}]" -f $category.ToUpperInvariant())
-    Write-RunLog -Path $logPath -Message ("원인: {0}" -f $summary)
-    # 원본과 달리 여기서 run.log/claude.stderr.log를 삭제하지 않는다 — 2026-08-21 실패 조사 시
-    # 로그가 이미 지워져 원인 규명이 불가능했던 문제를 재발시키지 않기 위함. 대신 report 폴더
-    # 자체를 다음 재시도 전까지 보존해 사후 분석 가능하게 한다.
-    throw "{0}. 로그: {1}" -f $summary, $logPath
 }
+
+$engineWorkDir = Join-Path ([IO.Path]::GetTempPath()) 'DailyNewsPickerClaudeWork/current'
+Invoke-DailyReport -EngineWorkDir $engineWorkDir -LocalOnly:$SkipDownstream

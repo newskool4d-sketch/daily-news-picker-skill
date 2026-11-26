@@ -11,17 +11,21 @@
 선별·랭킹·요약은 기존 스킬 프롬프트(에이전트)가 수행한다.
 
 사용:
-    python collect_news_rss.py                       # 오늘 기준 창 (직전 업무일 05:00 ~ 오늘 05:00 KST)
+    python collect_news_rss.py                       # 오늘 기준 창 (직전 업무일 09:00 ~ 오늘 09:00 KST)
     python collect_news_rss.py --date 2026-07-17     # 보고일 지정
     python collect_news_rss.py --start "2026-07-16 05:00" --end "2026-07-17 05:00"
     python collect_news_rss.py --out-dir <폴더>       # 기본: 현재 폴더
+    python collect_news_rss.py --coverage-roster references/media-sources.md
     python collect_news_rss.py --no-resolve          # 원문 URL 복원 생략(빠른 확인용)
     python collect_news_rss.py --self-test           # 순수 함수 자체 테스트
 """
 import argparse
+import http.client
 import json
+import os
 import re
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -29,6 +33,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -37,6 +42,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 RESOLVE_TIMEOUT_SECONDS = 8
 RESOLVE_MAX_WORKERS = 24
 RESOLVE_RETRY_DELAY_SECONDS = 0.5
+SOURCE_CHECK_WORKERS = 6
+HOLIDAY_CACHE_DIR = Path.home() / ".codex" / "skills" / "daily-news-picker" / "cache"
 
 # 검색어 세트 — references/search-recipes.md 의 Q1~Q7과 동기 유지할 것.
 # 직속기관 목록 정본: references/institution-scope.md
@@ -146,11 +153,6 @@ TRACKING_PARAMS = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_
 
 # ---------- 순수 함수 ----------
 
-def title_key(title: str) -> str:
-    """엔진 간 중복 판별용 제목 키 (공백·특수문자 제거). 같은 기사가 m./www. 등 다른 URL로 잡히는 경우 대비."""
-    return re.sub(r"[^0-9A-Za-z가-힣]", "", title).lower()
-
-
 def strip_html_tags(text: str) -> str:
     """네이버 API 제목의 <b> 태그·HTML 엔티티 제거."""
     import html
@@ -176,12 +178,91 @@ def clean_url(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
-def previous_business_day(date):
-    """토·일만 건너뛴 직전 업무일. 공휴일 처리는 러너(PowerShell) 쪽 창 인자를 신뢰한다."""
-    d = date - timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d
+def holiday_dates(records, year):
+    # PowerShell ConvertTo-Json can serialize a single record as an object.
+    if isinstance(records, dict):
+        records = [records]
+    if not isinstance(records, list) or not records:
+        raise ValueError("공휴일 목록이 비어 있거나 형식이 잘못되었습니다.")
+    dates = set()
+    for record in records:
+        value = record.get("date") if isinstance(record, dict) else None
+        if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("공휴일 날짜 형식이 잘못되었습니다.")
+        day = datetime.strptime(value, "%Y-%m-%d").date()
+        if day.year != year:
+            raise ValueError("요청 연도와 공휴일 날짜가 다릅니다.")
+        dates.add(day)
+    return dates
+
+
+def korean_public_holidays(year):
+    """PowerShell 실행기와 같은 연도별 캐시, 7일 유효기간 및 장애 대체 규칙을 쓴다."""
+    path = HOLIDAY_CACHE_DIR / f"holidays-kr-{year}.json"
+    cached = None
+    try:
+        cached = holiday_dates(json.loads(path.read_text(encoding="utf-8-sig")), year)
+        if time.time() - path.stat().st_mtime < 7 * 24 * 3600:
+            return cached
+    except (OSError, ValueError):
+        pass
+
+    try:
+        with urllib.request.urlopen(
+            f"https://date.nager.at/api/v3/PublicHolidays/{year}/KR", timeout=20
+        ) as response:
+            records = json.load(response)
+        dates = holiday_dates(records, year)
+    except (OSError, ValueError, http.client.HTTPException):
+        if cached is not None:
+            print("공휴일 API 조회 실패. 만료된 캐시로 대체합니다.", file=sys.stderr)
+            return cached
+        print("공휴일 API 조회 실패. 주말만 휴무로 간주합니다.", file=sys.stderr)
+        return set()
+
+    temp_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as temp:
+            temp_path = Path(temp.name)
+            json.dump(records, temp, ensure_ascii=False)
+        temp_path.replace(path)
+    except OSError:
+        print("공휴일 캐시 저장 실패. 이번 조회 결과를 사용합니다.", file=sys.stderr)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+    return dates
+
+
+def previous_business_day(report_date):
+    holidays = {}
+    for offset in range(1, 15):
+        day = report_date - timedelta(days=offset)
+        if day.weekday() < 5:
+            if day.year not in holidays:
+                holidays[day.year] = korean_public_holidays(day.year)
+            candidate_date = day.date() if isinstance(day, datetime) else day
+            if candidate_date not in holidays[day.year]:
+                return day
+    raise ValueError(f"직전 업무일을 계산하지 못했습니다: {report_date:%Y-%m-%d}")
+
+
+def collection_window(report_date, start, end):
+    if (start is None) != (end is None):
+        raise ValueError("--start와 --end를 함께 지정하세요.")
+    if start is not None:
+        window_start = datetime.strptime(start, "%Y-%m-%d %H:%M").replace(tzinfo=KST)
+        window_end = datetime.strptime(end, "%Y-%m-%d %H:%M").replace(tzinfo=KST)
+        if window_start >= window_end:
+            raise ValueError("--start는 --end보다 빨라야 합니다.")
+        return window_start, window_end
+
+    day = datetime.strptime(report_date, "%Y-%m-%d") if report_date else datetime.now(KST)
+    cutoff = day.replace(hour=9, minute=0, second=0, microsecond=0, tzinfo=KST)
+    return previous_business_day(cutoff), cutoff
 
 
 def in_window(published_kst: datetime, start: datetime, end: datetime) -> bool:
@@ -328,6 +409,8 @@ def fetch_rss(query: str, when: str):
     req = urllib.request.Request(url, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=30) as resp:
         root = ET.fromstring(resp.read())
+    if query.startswith("site:") and (root.tag != "rss" or root.find("channel") is None):
+        raise ValueError("매체 검색 응답에서 RSS 채널을 찾지 못했습니다.")
     items = []
     for item in root.iter("item"):
         source = item.find("source")
@@ -429,7 +512,113 @@ def resolve_article_urls(articles, max_workers=RESOLVE_MAX_WORKERS):
     return sum(1 for article in articles if article["url_status"] == "복원")
 
 
+def merge_rss_items(items, seen_ids, query_tag, window_start, window_end, domain=None):
+    added = matched = unclassifiable = other_domains = 0
+    for item in items:
+        try:
+            pub = parsedate_to_datetime(item["pubdate"])
+            if domain and pub.tzinfo is None:
+                raise ValueError("매체 검색 결과의 시간대가 없습니다.")
+            pub = pub.astimezone(KST)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            unclassifiable += 1
+            continue
+        if not in_window(pub, window_start, window_end):
+            continue
+        try:
+            source_domain = urllib.parse.urlsplit(item.get("source_url") or "").hostname or ""
+        except ValueError:
+            source_domain = ""
+        source_domain = source_domain.rstrip(".")
+        if domain:
+            if not source_domain:
+                unclassifiable += 1
+                continue
+            if source_domain != domain and not source_domain.endswith("." + domain):
+                other_domains += 1
+                continue
+        if source_domain in EXCLUDED_DOMAINS:
+            continue
+        link = item.get("link") or ""
+        title = strip_source_suffix(item.get("title") or "", item.get("source_name") or "")
+        if domain and (not link or not title):
+            unclassifiable += 1
+            continue
+        matched += 1
+        gid_match = re.search(r"/articles/([^?]+)", link)
+        gid = gid_match.group(1) if gid_match else link
+        if gid in seen_ids:
+            if query_tag not in seen_ids[gid]["queries"]:
+                seen_ids[gid]["queries"].append(query_tag)
+            continue
+        relevance = classify_title_relevance(title)
+        seen_ids[gid] = {
+            "title": title,
+            "publisher": item.get("source_name") or "",
+            "publisher_domain": source_domain,
+            "google_url": link,
+            "original_url": None,
+            "url_status": "미복원",
+            "published_at_kst": pub.strftime("%Y-%m-%d %H:%M"),
+            "queries": [query_tag],
+            "engine": "google-news-rss",
+            "relevance_hint": relevance["status"],
+            "publication_eligible": DEFAULT_PUBLICATION_ELIGIBLE,
+            "relevance_reasons": relevance["reasons"],
+            "location_hits": relevance["location_hits"],
+            "education_subject_hits": relevance["subject_hits"],
+            "student_story_hits": relevance["story_hits"],
+            "negative_context_hits": relevance["negative_hits"],
+        }
+        added += 1
+    return added, matched, unclassifiable, other_domains
+
+
+def check_source_domains(domains, range_op, window_start, window_end, seen_ids):
+    statuses, evidence = {}, {}
+    with ThreadPoolExecutor(max_workers=SOURCE_CHECK_WORKERS, thread_name_prefix="gnews-site") as executor:
+        jobs = {}
+        for domain in domains:
+            query = f"site:{domain} 인천교육청"
+            jobs[domain] = (query, executor.submit(fetch_rss, query, range_op))
+        # Merge in roster order even when later outlets finish sooner.
+        for domain, (query, future) in jobs.items():
+            entry = {
+                "engine": "google-news-rss", "query": query, "range_operator": range_op,
+                "fetched_count": None, "matched_count": 0, "error": None,
+            }
+            try:
+                items = future.result()
+            except Exception as error:
+                entry["error"] = f"{type(error).__name__}: {error}"
+            else:
+                _, matched, unknown, other = merge_rss_items(
+                    items, seen_ids, f"SOURCE:{query}", window_start, window_end, domain
+                )
+                entry.update(fetched_count=len(items), matched_count=matched,
+                             unclassifiable_count=unknown, other_domain_count=other)
+                reasons = []
+                if len(items) >= 100:
+                    reasons.append("100건 상한 도달")
+                if unknown:
+                    reasons.append(f"시각·매체·기사 정보 확인 불가 {unknown}건")
+                if other and not matched:
+                    reasons.append("기간 안 타 매체 결과만 반환됨")
+                entry["error"] = ", ".join(reasons) or None
+            if entry["error"]:
+                statuses[domain] = "failed"
+            else:
+                statuses[domain] = "checked_found" if entry["matched_count"] else "checked_empty"
+            evidence[domain] = entry
+    return statuses, evidence
+
+
 def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
+    articles, failures, _, _ = collect_with_sources(window_start, window_end, resolve, ())
+    return articles, failures
+
+
+def collect_with_sources(window_start, window_end, resolve, domains):
     range_op = gnews_range_operator(window_start, window_end)
     seen_ids = {}
     failures = []
@@ -442,48 +631,15 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
             print(f"[수집 실패] {label} '{query}': {e}", file=sys.stderr)
             continue
         capped = len(items) >= 100
-        kept = 0
-        for it in items:
-            try:
-                pub = parsedate_to_datetime(it["pubdate"]).astimezone(KST)
-            except Exception:
-                continue
-            if not in_window(pub, window_start, window_end):
-                continue
-            source_domain = urllib.parse.urlsplit(it["source_url"]).netloc if it["source_url"] else ""
-            if source_domain in EXCLUDED_DOMAINS:
-                continue
-            gid_m = re.search(r"/articles/([^?]+)", it["link"])
-            gid = gid_m.group(1) if gid_m else it["link"]
-            if gid in seen_ids:
-                seen_ids[gid]["queries"].append(f"{label}:{query}")
-                continue
-            title = strip_source_suffix(it["title"], it["source_name"])
-            relevance = classify_title_relevance(title)
-            seen_ids[gid] = {
-                "title": title,
-                "publisher": it["source_name"],
-                "publisher_domain": source_domain,
-                "google_url": it["link"],
-                "original_url": None,
-                "url_status": "미복원",
-                "published_at_kst": pub.strftime("%Y-%m-%d %H:%M"),
-                "queries": [f"{label}:{query}"],
-                "engine": "google-news-rss",
-                "relevance_hint": relevance["status"],
-                "publication_eligible": DEFAULT_PUBLICATION_ELIGIBLE,
-                "relevance_reasons": relevance["reasons"],
-                "location_hits": relevance["location_hits"],
-                "education_subject_hits": relevance["subject_hits"],
-                "student_story_hits": relevance["story_hits"],
-                "negative_context_hits": relevance["negative_hits"],
-            }
-            kept += 1
+        kept, _, _, _ = merge_rss_items(items, seen_ids, f"{label}:{query}", window_start, window_end)
         cap_note = " (⚠️ 100건 상한 도달 — 창 초반 기사 누락 가능)" if capped else ""
         print(f"[{label}] '{query}' → 창 내 신규 {kept}건{cap_note}")
         if capped:
             failures.append({"query": query, "label": label, "error": "100건 상한 도달"})
 
+    checks, evidence = {}, {}
+    if domains:
+        checks, evidence = check_source_domains(domains, range_op, window_start, window_end, seen_ids)
     articles = list(seen_ids.values())
 
     if resolve:
@@ -491,15 +647,28 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
         resolved = resolve_article_urls(articles)
         print(f"복원 완료: {resolved}/{len(articles)}")
 
+    # 서로 다른 Google ID라도 복원된 원문 URL이 같으면 검색 경로를 합친다.
+    known_urls = {}
+    distinct = []
+    for article in articles:
+        original = article["original_url"]
+        if original and original in known_urls:
+            previous_queries = known_urls[original]["queries"]
+            previous_queries.extend(q for q in article["queries"] if q not in previous_queries)
+            continue
+        if original:
+            known_urls[original] = article
+        distinct.append(article)
+    articles = distinct
+
     # 상한 도달·수집 실패 쿼리는 네이버 뉴스 API로 보강 (키 없으면 건너뜀)
     supplement_queries = [(f["label"], f["query"]) for f in failures]
     if supplement_queries:
         cid, csec = naver_keys()
         if cid and csec:
-            known_urls = {a["original_url"] for a in articles if a.get("original_url")}
-            known_titles = {title_key(a["title"]) for a in articles}
             added = 0
             for label, query in supplement_queries:
+                query_tag = f"{label}:{query}"
                 try:
                     items = fetch_naver_window(query, cid, csec, window_start)
                 except Exception as e:
@@ -518,13 +687,14 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
                     domain = urllib.parse.urlsplit(original).netloc
                     if domain in EXCLUDED_DOMAINS:
                         continue
-                    title = strip_html_tags(it.get("title", "")).strip()
-                    if original in known_urls or title_key(title) in known_titles:
+                    if original in known_urls:
+                        previous_queries = known_urls[original]["queries"]
+                        if query_tag not in previous_queries:
+                            previous_queries.append(query_tag)
                         continue
-                    known_urls.add(original)
-                    known_titles.add(title_key(title))
+                    title = strip_html_tags(it.get("title", "")).strip()
                     relevance = classify_title_relevance(title)
-                    articles.append({
+                    article = {
                         "title": title,
                         "publisher": "",  # 네이버 API는 매체명 미제공 — 도메인으로 후속 판별
                         "publisher_domain": domain,
@@ -532,7 +702,7 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
                         "original_url": original,
                         "url_status": "원문직접",
                         "published_at_kst": pub.strftime("%Y-%m-%d %H:%M"),
-                        "queries": [f"{label}:{query}"],
+                        "queries": [query_tag],
                         "engine": "naver-api",
                         "relevance_hint": relevance["status"],
                         "publication_eligible": DEFAULT_PUBLICATION_ELIGIBLE,
@@ -541,14 +711,16 @@ def collect(window_start: datetime, window_end: datetime, resolve: bool = True):
                         "education_subject_hits": relevance["subject_hits"],
                         "student_story_hits": relevance["story_hits"],
                         "negative_context_hits": relevance["negative_hits"],
-                    })
+                    }
+                    articles.append(article)
+                    known_urls[original] = article
                     added += 1
             print(f"네이버 API 보강: 대상 쿼리 {len(supplement_queries)}개에서 신규 {added}건 추가")
         else:
             print("네이버 API 키 미설정 — 보강 생략 (환경변수 NAVER_CLIENT_ID/SECRET)")
 
     articles.sort(key=lambda a: a["published_at_kst"])
-    return articles, failures
+    return articles, failures, checks, evidence
 
 
 # ---------- 자체 테스트 ----------
@@ -560,7 +732,6 @@ def self_test():
     assert clean_url("https://a.kr/n/123") == "https://a.kr/n/123"
     assert clean_url("https://a.kr/n?idxno=1&wlog_tag3=naver") == "https://a.kr/n?idxno=1"
     assert strip_html_tags("<b>인천</b>교육청 &quot;발표&quot;") == '인천교육청 "발표"'
-    assert title_key("인천교육청, 발표!") == title_key("인천교육청 발표")
     assert classify_title_relevance("인천의 학생, 전국대회 대상")["status"] == "likely_relevant"
     assert classify_title_relevance("남동구 중학생 3명, 시민 구조")["status"] == "likely_relevant"
     assert classify_title_relevance("서해구 학교 보건교사 응급대응 교육")["status"] == "likely_relevant"
@@ -572,9 +743,6 @@ def self_test():
     assert classify_title_relevance("전국 학생 대상 공모전 개최")["status"] == "needs_review"
     assert len(AREA_QUERIES) == 24
     assert len(LOCALITY_QUERIES) == 4
-    # 2026-07-13은 월요일 → 직전 업무일은 금요일 7/10
-    assert previous_business_day(datetime(2026, 7, 13)) == datetime(2026, 7, 10)
-    assert previous_business_day(datetime(2026, 7, 17)) == datetime(2026, 7, 16)
     s = datetime(2026, 7, 16, 5, 0, tzinfo=KST)
     e = datetime(2026, 7, 17, 5, 0, tzinfo=KST)
     assert in_window(datetime(2026, 7, 16, 5, 0, tzinfo=KST), s, e)
@@ -590,6 +758,7 @@ def main():
     parser.add_argument("--start", help="창 시작 'YYYY-MM-DD HH:MM' KST")
     parser.add_argument("--end", help="창 종료 'YYYY-MM-DD HH:MM' KST")
     parser.add_argument("--out-dir", default=".", help="저장 폴더")
+    parser.add_argument("--coverage-roster", type=Path, help="검색할 매체 목록 Markdown 파일")
     parser.add_argument("--no-resolve", action="store_true", help="원문 URL 복원 생략")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -598,17 +767,28 @@ def main():
         self_test()
         return
 
-    if args.start and args.end:
-        window_start = datetime.strptime(args.start, "%Y-%m-%d %H:%M").replace(tzinfo=KST)
-        window_end = datetime.strptime(args.end, "%Y-%m-%d %H:%M").replace(tzinfo=KST)
-    else:
-        report_date = datetime.strptime(args.date, "%Y-%m-%d") if args.date else datetime.now(KST).replace(tzinfo=None)
-        report_date = report_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        window_start = previous_business_day(report_date).replace(hour=5, tzinfo=KST)
-        window_end = report_date.replace(hour=5, tzinfo=KST)
+    try:
+        window_start, window_end = collection_window(args.date, args.start, args.end)
+    except ValueError as error:
+        parser.error(str(error))
 
     print(f"점검 창: {window_start:%Y-%m-%d %H:%M} ~ {window_end:%Y-%m-%d %H:%M} KST\n")
-    articles, failures = collect(window_start, window_end, resolve=not args.no_resolve)
+    source_audit = {}
+    if args.coverage_roster is not None:
+        if __name__ == "__main__" and not __package__:
+            from promote_verified_candidates import read_coverage_domains
+        else:
+            from scripts.promote_verified_candidates import read_coverage_domains
+        try:
+            domains = read_coverage_domains(args.coverage_roster)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        articles, failures, checks, evidence = collect_with_sources(
+            window_start, window_end, not args.no_resolve, domains
+        )
+        source_audit = {"source_checks": checks, "source_check_evidence": evidence}
+    else:
+        articles, failures = collect(window_start, window_end, resolve=not args.no_resolve)
 
     out = {
         "window_start": f"{window_start:%Y-%m-%d %H:%M}",
@@ -618,8 +798,8 @@ def main():
         "article_count": len(articles),
         "failures": failures,
         "articles": articles,
+        **source_audit,
     }
-    import os
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, "collected_articles.json")
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:

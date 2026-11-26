@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import importlib.util
+import os
 import shutil
 import subprocess
 import tempfile
@@ -99,59 +100,15 @@ class RelevanceRulesTest(unittest.TestCase):
         ):
             self.assertIn(query, queries)
 
-    def test_runner_keeps_approved_briefing_then_candidate_publication_order(self):
-        briefing_call = '@($organizerScript, "ingest", "--briefing", $markdownPath)'
-        candidate_call = '@($organizerScript, "ingest", "--json", $ingestJsonPath)'
-        for runner_name in (
-            "run-daily-news-picker.ps1",
-            "run-daily-news-picker-claude.ps1",
-        ):
-            with self.subTest(runner=runner_name):
-                runner = (ROOT / "scripts" / runner_name).read_text(encoding="utf-8")
-                self.assertIn(briefing_call, runner)
-                self.assertIn(
-                    "Copy-Item -Path $collectedJsonPath -Destination $persistedCollectedJsonPath",
-                    runner,
-                )
-                self.assertIn(candidate_call, runner)
-                self.assertLess(runner.index(briefing_call), runner.index(candidate_call))
-
-    def test_runner_surfaces_downstream_native_command_failures(self):
-        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
-        self.assertIn("$nativeExitCode = $LASTEXITCODE", runner)
-        self.assertIn("if ($nativeExitCode -ne 0)", runner)
-        self.assertIn('STATUS: PARTIAL [DOWNSTREAM]', runner)
-        self.assertIn('Invoke-LoggedNativeCommand -Step "정적 사이트 게시"', runner)
-
     def test_collector_candidates_are_private_until_body_verification(self):
         self.assertFalse(NEWS.DEFAULT_PUBLICATION_ELIGIBLE)
         collector = (ROOT / "scripts" / "collect_news_rss.py").read_text(encoding="utf-8")
         self.assertIn('"publication_eligible": DEFAULT_PUBLICATION_ELIGIBLE', collector)
 
-    def test_runner_requires_downstream_contract_for_site_output(self):
-        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
-        self.assertIn("$downstreamRequired", runner)
-        self.assertIn("하류 구성요소 없음", runner)
-        self.assertIn('archive\\{0}.html', runner)
-        self.assertIn("exit 1", runner)
-
-    def test_runner_promotes_only_structured_body_verification(self):
-        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
-        self.assertIn("DAILY_NEWS_VERIFIED_CANDIDATES", runner)
-        self.assertIn("promote_verified_candidates.py", runner)
-        self.assertIn("verified_collected_articles.json", runner)
-        self.assertIn("verification_basis", runner)
-        self.assertIn('STATUS: PARTIAL [VERIFICATION]', runner)
-
     def test_runner_defaults_to_gpt_5_6_sol(self):
         runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
         self.assertIn('[string]$Model = "gpt-5.6-sol"', runner)
         self.assertNotIn('[string]$Model = "gpt-5.5"', runner)
-
-    def test_runner_timeout_cleanup_cannot_block_codex_fallback(self):
-        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
-        self.assertIn("$collectorProcess.WaitForExit(5000)", runner)
-        self.assertIn("수집기 임시 로그 읽기 실패(비치명)", runner)
 
     def test_runner_repairs_categorized_report_into_required_main_section(self):
         runner_path = ROOT / "scripts" / "run-daily-news-picker.ps1"
@@ -179,6 +136,9 @@ https://example.com/institution
 - 점검 범위 확인 완료
 """
         with tempfile.TemporaryDirectory() as temp_dir:
+            cache = Path(temp_dir) / ".codex/skills/daily-news-picker/cache"
+            cache.mkdir(parents=True)
+            (cache / "holidays-kr-2026.json").write_text("[]", encoding="utf-8")
             report_path = Path(temp_dir) / "report.md"
             html_path = Path(temp_dir) / "report.html"
             report_path.write_text(report, encoding="utf-8")
@@ -200,6 +160,8 @@ https://example.com/institution
                     str(html_path),
                 ],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
+                env={**os.environ, "USERPROFILE": temp_dir},
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -227,13 +189,6 @@ https://example.com/institution
         self.assertIn("$lastValidationFailures", runner)
         self.assertIn("이전 출력 검증 실패 항목:", runner)
         self.assertIn("$retryPrompt", runner)
-
-    def test_runner_preserves_successful_collector_json_on_report_validation_failure(self):
-        runner = (ROOT / "scripts" / "run-daily-news-picker.ps1").read_text(encoding="utf-8")
-        self.assertIn("수집 후보 JSON 보존:", runner)
-        self.assertIn("$collectorUsed -and (Test-NonEmptyFile -Path $persistedCollectedJsonPath)", runner)
-        self.assertIn("-ValidationFailures $lastValidationFailures", runner)
-
 
 class OriginalUrlResolutionTest(unittest.TestCase):
     def test_resolves_articles_with_bounded_workers_and_preserves_order(self):

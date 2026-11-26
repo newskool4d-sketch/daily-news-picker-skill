@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Offline report regressions; load runner functions without its workflow.
+"""Offline checks of report formatting, rendering and engine arguments.
 
-These checks never start the collector, an LLM, the organizer, or a publisher.
-The 2026-11-03 change intentionally leaves execution until the next normal run.
+test_runner_lifecycle exercises the complete entry points with synthetic inputs.
 """
 
 import ast
@@ -222,6 +221,7 @@ class RunnerReportFunctionsTest(unittest.TestCase):
                     str(request_path),
                 ],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -301,6 +301,16 @@ class RunnerReportFunctionsTest(unittest.TestCase):
                     self.assertIn(
                         "article_1_url", self.evaluate(runner, markdown)["failures"]
                     )
+
+    def test_repair_cannot_turn_excluded_articles_into_selected_coverage(self):
+        markdown = report("").replace("## 주요 언론보도\n", "")
+        markdown += "## 제외 또는 참고\n\n■ 제외 기사 - 테스트매체\nhttps://example.org/excluded\n"
+        for runner in RUNNERS:
+            with self.subTest(runner=runner.name):
+                result = self.evaluate(runner, markdown)
+                self.assertIn("main_section", result["failures"])
+                self.assertNotIn("## 주요 언론보도", result["markdown"])
+                self.assertIn("## 제외 또는 참고", result["markdown"])
 
     def test_relative_non_http_or_hostless_urls_are_rejected(self):
         for url in (
@@ -407,6 +417,7 @@ class RunnerReportFunctionsTest(unittest.TestCase):
                     str(ROOT),
                 ],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="replace",

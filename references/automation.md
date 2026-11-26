@@ -76,19 +76,9 @@ stage (DB → digest → site) was skipped (`STATUS: PARTIAL [DOWNSTREAM]`). `Re
 injection), and the prompt pins that line explicitly. Rule of thumb: metadata the runner already knows
 (report date, check window) is injected by the runner, never left to the model's phrasing.
 
-Recovery for this failure class needs no Claude re-run — the Markdown is already valid content. Re-apply the
-repair to the real file and run the downstream steps only:
-
-```powershell
-# 1) repair in place (+ regenerate the briefing HTML)
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\run-daily-news-picker-claude.ps1" -BasePath "$env:USERPROFILE\Documents\Codex\DailyNewsPicker" -ReportDate "YYYY-MM-DD" -CollectionTime "09:00" -ValidateReportPath "<folder>\인천교육청 언론보도 현황.md" -ValidationHtmlOutputPath "<folder>\인천교육청 언론보도 현황.html"
-# 2) downstream (organizer scripts)
-python newsdb.py ingest --briefing "<folder>\인천교육청 언론보도 현황.md"
-python newsdb.py ingest --json "<folder>\verified_collected_articles.json"
-python newsdb.py group --date YYYY-MM-DD
-python newsdb.py digest --date YYYY-MM-DD --format html --out "<folder>\교육뉴스 다이제스트.html"
-python publish_site.py --site-dir "$env:USERPROFILE\Documents\Codex\EduNewsSite" --date YYYY-MM-DD --push
-```
+For a downstream failure, repeat the same runner invocation, report date and collection time without `-Force`.
+The runner checks the saved report hashes and resumes at the first unfinished organizer step. `-Force` starts a new collection.
+A legacy date folder without a verified checkpoint is rebuilt in staging; its prior report remains available until validation succeeds.
 
 ## Headless Authentication (measured 2026-10-01 ~ 10-02)
 
@@ -126,7 +116,7 @@ previous day without re-registration.
 - HTML file: `인천교육청 언론보도 현황.html`
 - Raw candidate JSON: `collected_articles.json` (수집 원본, 항상 보존)
 - Verified candidate JSON: `verified_collected_articles.json` (본문 검증 표식으로 승격된 파생본)
-- Verification manifest: `verification-manifest.json` (승격 근거·무시 항목 감사 기록)
+- Verification manifest: `verification-manifest.json` (선정 근거 및 도메인별 조회 결과)
 - Run log: `run.log`
 - Prompt snapshot: `prompt.txt`
 
@@ -156,26 +146,11 @@ previous day without re-registration.
    For Codex, `codex exec -` is required:
    the npm `.cmd` shim truncates argv at the first newline, which silently delivered only the prompt's first line
    in every run during 2026-07-14~17 and caused three consecutive daily failures once the read-only sandbox landed.
-7. It repairs and validates the report, retrying within the configured attempt budget on invalid output. Each main-list
-   article needs its own absolute HTTP(S) URL; a reference-section URL cannot cover a missing article URL.
-   A main list cannot contain both articles and a no-article declaration. Final report-validation failure stops before
-   candidate promotion, DB ingest, and site publication; it must not be repaired by silently deleting articles.
-8. Before downstream ingest, the runner reads the model's `DAILY_NEWS_VERIFIED_CANDIDATES` marker. Each entry must
-   carry an exact candidate URL, `verified: true`, `publication_eligible: true`, and a concrete body-evidence
-   `verification_basis`. The runner writes `verified_collected_articles.json`, strips the internal marker from the
-   public Markdown, and keeps the raw `collected_articles.json` unchanged. Missing or malformed markers fail closed;
-   candidates remain private and the run records `PARTIAL [VERIFICATION]` when the marker cannot be processed.
-9. It converts the validated, marker-stripped Markdown into HTML. Plain article URLs and Markdown links become
-   clickable anchors, with title and URL on separate lines and escaped HTML text. URL syntax validation and rendering
-   do not replace actual article-body/source checks.
-10. It feeds the downstream organizer (`~/.codex/skills/edu-news-organizer/scripts/newsdb.py`): briefing md first,
-   then the verified candidate JSON (or the raw private pool when no promotion occurred), then same-story grouping,
-   then a premium HTML digest (`교육뉴스 다이제스트.html`, Incheon Education CI design) saved next to the briefing.
-   Output goes to `organizer-ingest.log`; required downstream or verification failures are surfaced as non-zero.
-
-This improvement keeps that `edu-news-organizer` contract: briefing → candidate JSON → group → digest → existing
-site publication. The raw candidate pool is preserved separately from promotion output. Same-story grouping,
-three-section layout, and responsive grid continue to be owned by the organizer and are not redesigned here.
+7. Both runners use `report-lifecycle.ps1`. A date lock protects the report files across engines, and an engine lock protects its fixed work directory across dates. `-DryRun` prints the destination and cutoff before creating or modifying files. The date folder holds the run log, prompt and verification log; the candidate pool and draft for the latest attempt are prepared under `.report-stage`.
+8. The runner checks the report date, window, title and URL of every main-list article. It requires exactly one verified-candidate marker, including an empty array when appropriate. Its URL set must match the intersection of main-list articles and collector candidates. Missing or invalid evidence stops publication.
+9. The collector checks each required outlet domain using its date-window RSS query. The model can supplement failed checks with direct searches. The verification manifest records which domains returned hits, returned no hits or failed. Incomplete checks produce `수집 미완료.md`, `수집 미완료.html` and `수집 미완료 점검기록.json` with a nonzero exit. The prior completed briefing and DB stay available.
+10. The runner installs the validated Markdown, HTML, selected-only briefing, candidate JSON and audit as one recoverable local update. An interrupted replacement is rolled back on the next invocation. File hashes and downstream progress are recorded in `report-state.json`. A failed refresh is retried on the next normal invocation. The latest failed raw candidate pool can be inspected in `.report-stage/collected_articles.json` before retrying.
+11. The organizer ingests `selected-briefing.md` (date and main-list articles only) and then `verified_collected_articles.json`. An empty dated candidate snapshot clears prior collector selections when the engine used a search fallback. Grouping, digest generation and configured site publication follow in order. Each successful step is checkpointed; downstream failures return a nonzero exit and a normal rerun resumes without collecting again.
 
 ## Safety Notes
 

@@ -64,6 +64,7 @@ Use the deep-research pattern in a faster news-monitoring form:
    Queries that hit the 100-item cap or fail are automatically supplemented from the Naver News API when
    `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET` env vars exist; treat `engine: naver-api` entries as unfiltered
    candidates that need an explicit relevance check during selection (실측: 보강 33건 중 절반가량이 본문 매칭 노이즈).
+   For a standalone run the default cutoff is 09:00 KST. Pass both `--start` and `--end` to override it, and pass `--coverage-roster references/media-sources.md` for the per-outlet audit.
    Use that JSON as the candidate pool and spend browsing effort on selection, verification, and follow-up instead of raw collection.
    If shell execution is not available, search recent coverage with external press article links first:
    start with institution-name queries in news search, then run the monitored-outlet source-seed checks from [references/media-sources.md](./references/media-sources.md).
@@ -80,7 +81,8 @@ Use the deep-research pattern in a faster news-monitoring form:
     If only an official source page exists, label it as `공식 보도자료(대체)` or place it in `제외 또는 참고`; do not present it as an original article.
     In the scheduled runner, list every body-verified collector candidate included in the report in the
     `DAILY_NEWS_VERIFIED_CANDIDATES` marker with its exact URL and concrete body evidence; the runner promotes only
-    those entries to `publication_eligible=true` and strips the internal marker before public output.
+    those entries to `publication_eligible=true` and strips the internal marker before public output. Use one empty array if none were selected.
+    Keep every excluded or background article under an explicit `## 제외 또는 참고` heading.
 4. Prioritize monitored press sources and original article links.
    Prefer journalist-bylined local, education-specialized, national, or agency articles over official press releases and institution notices.
    Use official press releases and notices as fact-checking or last-resort fallback sources only.
@@ -96,6 +98,9 @@ Use the deep-research pattern in a faster news-monitoring form:
 8. Search outline gaps before writing.
    If the briefing needs `핵심 요약`, `주요 언론보도`, or `제외/참고`, make sure each section has evidence or a clear `확인 필요` note.
    If the collected article count is unexpectedly low, explicitly run the monitored-outlet domains before concluding that coverage is sparse.
+   Record a status for each required outlet. Use the collector’s domain checks and search missed or failed outlets directly.
+   The scheduled runner reads a separate `DAILY_NEWS_SOURCE_CHECKS` JSON marker mapping each domain to `checked_found`, `checked_empty` or `failed`.
+   Mark unfinished searches as failed. If any remain, label the report `수집 미완료` and list the domains. A final zero-article result requires complete domain checks.
 9. Run a source/date audit.
    Check article dates, source links, institution names, duplicate status, and whether each selected item is inside the requested period.
 10. Write a full coverage-status briefing.
@@ -128,7 +133,7 @@ Use [references/selection-output-rules.md](references/selection-output-rules.md)
 - This skill is intended to run by default for daily news monitoring without requiring an explicit trigger phrase each time.
 - However, automatic day-by-day file creation requires an external scheduler or workflow runner.
 - If no scheduler is configured, the skill can still be invoked implicitly during relevant news-monitoring tasks, but it cannot guarantee unattended daily generation on its own.
-- The bundled runner keeps `run.log` status lines and removes empty partial outputs on failure.
+- The bundled runner preserves the last validated report if a refresh fails. Retry the same date and cutoff without `-Force` to resume downstream processing.
 - Broad Codex bypass mode should be treated as an explicit opt-in for automation, not a default.
 
 ## Writing Rules

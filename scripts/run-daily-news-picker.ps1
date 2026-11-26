@@ -31,10 +31,6 @@ if ($EnablePublicPush -and [string]::IsNullOrWhiteSpace($SiteDir)) {
     throw "공개 배포를 켜려면 -SiteDir를 지정하거나 EDU_NEWS_SITE_DIR 환경변수를 설정하세요."
 }
 
-# 예약 작업은 사용자 환경변수에 의존하지 않도록 명시 인수를 프로세스 범위에 고정한다.
-$env:EDU_NEWS_SITE_DIR = $SiteDir
-$env:EDU_NEWS_SITE_PUSH = if ($EnablePublicPush) { "1" } else { "0" }
-
 if ($CollectionTime -lt [timespan]::Zero -or $CollectionTime -ge [timespan]::FromDays(1)) {
     throw "CollectionTime은 00:00 이상 24:00 미만이어야 합니다: $CollectionTime"
 }
@@ -269,7 +265,7 @@ function Convert-MarkdownToHtmlDocument {
         [string]$Title
     )
 
-    $markdown = Get-Content $MarkdownPath -Raw -Encoding UTF8
+    $markdown = Get-Content -LiteralPath $MarkdownPath -Raw -Encoding UTF8
 
     # The markdown body is built from external news-article titles/links, so it
     # is untrusted input. ConvertFrom-Markdown (markdig) passes raw inline HTML
@@ -549,7 +545,7 @@ function Get-PreferredGeneratedFile {
 function Remove-IfExists {
     param([string]$Path)
 
-    if ($Path -and (Test-Path $Path)) {
+    if ($Path -and (Test-Path -LiteralPath $Path)) {
         Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
     }
 }
@@ -557,11 +553,11 @@ function Remove-IfExists {
 function Test-NonEmptyFile {
     param([string]$Path)
 
-    if (-not (Test-Path $Path)) {
+    if (-not (Test-Path -LiteralPath $Path)) {
         return $false
     }
 
-    $item = Get-Item -Path $Path -ErrorAction SilentlyContinue
+    $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
     return ($item -and $item.Length -gt 0)
 }
 
@@ -572,7 +568,7 @@ function Repair-MarkdownReport {
         return
     }
 
-    $content = Get-Content -Path $Path -Raw -Encoding UTF8
+    $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
     $normalized = ($content -replace "^\uFEFF", "").Trim()
     if ([string]::IsNullOrWhiteSpace($normalized)) {
         return
@@ -580,6 +576,27 @@ function Repair-MarkdownReport {
 
     if (-not $normalized.TrimStart().StartsWith("# 인천교육청 언론보도 현황")) {
         $normalized = "# 인천교육청 언론보도 현황`r`n`r`n$normalized"
+    }
+
+    $headerLines = @()
+    $dateHeaderPresent = $normalized -match ('(?m)^[ \t]*(?:20\d{2}\.[ \t]*\d{1,2}\.[ \t]*\d{1,2}\.[ \t]*\(.\).*주요 언론보도 현황입니다' +
+        '|(?:[-*][ \t]*)?보고일[ \t]*:[ \t]*20\d{2}[ \t]*[-./][ \t]*\d{1,2}[ \t]*[-./][ \t]*\d{1,2})')
+    if (-not $dateHeaderPresent) {
+        $headerLines += "- 보고일: $reportDateDisplay"
+    }
+    if (($normalized -notmatch [regex]::Escape($windowStartDisplay)) -or
+        ($normalized -notmatch [regex]::Escape($windowEndDisplay))) {
+        $headerLines += "점검 창: $windowStartDisplay ~ $windowEndDisplay (Asia/Seoul)"
+    }
+    if ($headerLines.Count -gt 0) {
+        $insertion = [string]::Join("`r`n", $headerLines)
+        $normalized = [regex]::Replace(
+            $normalized,
+            '(?m)^(#\s*인천교육청 언론보도 현황\s*)$',
+            ('$1' + "`r`n`r`n" + $insertion),
+            [System.Text.RegularExpressions.RegexOptions]::None,
+            [timespan]::FromSeconds(5)
+        )
     }
 
     $normalized = [regex]::Replace($normalized, '(?m)^(핵심 요약|주요 언론보도|제외 또는 참고)\s*$', '## $1')
@@ -591,24 +608,27 @@ function Repair-MarkdownReport {
             [void]$lines.Add($line)
         }
 
+        $reservedHeadings = @('핵심 요약', '제외 또는 참고', '검증 메모')
+        $insideReserved = $false
         $firstArticleIndex = -1
         for ($index = 0; $index -lt $lines.Count; $index++) {
-            if ($lines[$index] -match '^■\s+.+\s+-\s+.+$') {
+            if ($lines[$index] -match '^##\s+(.+?)\s*$') {
+                $insideReserved = $Matches[1].Trim() -in $reservedHeadings
+            } elseif ($lines[$index] -match '^#{3,6}\s+(핵심 요약|제외 또는 참고|검증 메모)\s*$') {
+                $insideReserved = $true
+            } elseif (-not $insideReserved -and $lines[$index] -match '^■\s+.+\s+-\s+.+$') {
                 $firstArticleIndex = $index
                 break
             }
         }
 
         if ($firstArticleIndex -ge 0) {
-            $reservedHeadings = @('핵심 요약', '주요 언론보도', '제외 또는 참고', '검증 메모')
             $firstCategoryHeadingIndex = -1
             for ($index = $firstArticleIndex - 1; $index -ge 0; $index--) {
                 if ($lines[$index] -match '^##\s+(.+?)\s*$') {
                     $heading = $Matches[1].Trim()
-                    if ($heading -notin $reservedHeadings) {
-                        $firstCategoryHeadingIndex = $index
-                        break
-                    }
+                    if ($heading -notin $reservedHeadings) { $firstCategoryHeadingIndex = $index }
+                    break
                 }
             }
 
@@ -646,24 +666,32 @@ function Get-MarkdownReportValidationFailures {
         return @('non_empty_file')
     }
 
-    $content = Get-Content -Path $Path -Raw -Encoding UTF8
+    $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
     $trimmed = $content.TrimStart()
     $failures = [System.Collections.Generic.List[string]]::new()
     if (-not ($trimmed.StartsWith("# 인천교육청 언론보도 현황") -or ($trimmed -match '^20\d{2}\.\s*\d{1,2}\.\s*\d{1,2}\.'))) {
         [void]$failures.Add('title')
+    }
+    # Check every date the downstream parser can select, including the legacy opening line.
+    $datePattern = '(?m)^[ \t]*(?:(?:[-*][ \t]*)?보고일[ \t]*:[ \t]*|(?![^\r\n]*보고일)(?=[^\r\n]*주요 언론보도 현황입니다))(?<year>20\d{2})[ \t]*[-./][ \t]*(?<month>\d{1,2})[ \t]*[-./][ \t]*(?<day>\d{1,2})(?!\d)'
+    $dates = [regex]::Matches($content, $datePattern)
+    if ($dates.Count -eq 0) { [void]$failures.Add('report_date') }
+    foreach ($date in $dates) {
+        $isoDate = '{0}-{1:D2}-{2:D2}' -f $date.Groups['year'].Value, [int]$date.Groups['month'].Value, [int]$date.Groups['day'].Value
+        if ($isoDate -ne $reportDateDisplay) { [void]$failures.Add('report_date'); break }
     }
     $mainSections = [regex]::Matches($content, '(?m)^##[ \t]+주요 언론보도[ \t]*\r?$')
     if ($mainSections.Count -ne 1) {
         [void]$failures.Add('main_section')
     } else {
         $mainContent = $content.Substring($mainSections[0].Index + $mainSections[0].Length)
-        $nextSection = [regex]::Match($mainContent, '(?m)^##(?:[ \t]+|$)')
+        $nextSection = [regex]::Match($mainContent, '(?m)^(?:#{1,2}(?:[ \t]+|$)|#{3,6}[ \t]+(?:핵심 요약|제외 또는 참고|검증 메모)[ \t]*\r?$)')
         if ($nextSection.Success) {
             $mainContent = $mainContent.Substring(0, $nextSection.Index)
         }
         $articles = [regex]::Matches($mainContent, '(?m)^■[^\r\n]*')
         $noArticles = $mainContent -match '확인된 유의미 기사 없음'
-        if ($articles.Count -eq 0 -and -not $noArticles) {
+        if ($articles.Count -eq 0 -and -not $noArticles -and $mainContent -notmatch '(?m)^(?:[-*] )?수집 미완료[ \t]*(?:\r?$|[:(])') {
             [void]$failures.Add('article_list')
         }
         if ($articles.Count -gt 0 -and $noArticles) {
@@ -705,27 +733,6 @@ function Test-IsMarkdownReport {
     param([string]$Path)
 
     return (@(Get-MarkdownReportValidationFailures -Path $Path).Count -eq 0)
-}
-
-function Get-GeneratedReportMarkdown {
-    param([string[]]$SearchDirs)
-
-    foreach ($searchDir in $SearchDirs) {
-        if (-not (Test-Path $searchDir)) {
-            continue
-        }
-
-        $candidate = Get-ChildItem -Path $searchDir -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending |
-            Where-Object { Test-IsMarkdownReport -Path $_.FullName } |
-            Select-Object -First 1
-
-        if ($candidate) {
-            return $candidate
-        }
-    }
-
-    return $null
 }
 
 function Set-GitBashEnvironment {
@@ -819,9 +826,15 @@ function Get-RunFailureSummary {
     return ("{0} (exit code: {1})" -f $detail, $ExitCode)
 }
 
+. (Join-Path $PSScriptRoot 'report-lifecycle.ps1')
+
 $reportDate = $ReportDate.Date
 $reportDateStamp = $reportDate.ToString("yyyyMMdd")
 $reportDateDisplay = $reportDate.ToString("yyyy-MM-dd")
+if ($DryRun) {
+    Write-Log "DryRun: 보고일 $reportDateDisplay, 수집 마감 $CollectionTime, 출력 $BasePath"
+    exit 0
+}
 $windowStart = (Get-PreviousBusinessDay -Date $reportDate).Date.Add($CollectionTime)
 $windowEnd = $reportDate.Date.Add($CollectionTime)
 $windowStartDisplay = $windowStart.ToString("yyyy-MM-dd HH:mm")
@@ -837,40 +850,14 @@ if (-not [string]::IsNullOrWhiteSpace($ValidateReportPath)) {
         Write-Output ("REPORT_VALIDATION: FAIL [{0}]" -f ($validationFailures -join ','))
         exit 2
     }
-    if (-not [string]::IsNullOrWhiteSpace($ValidationHtmlOutputPath)) {
-        $validationHtmlParent = Split-Path -Parent $ValidationHtmlOutputPath
-        if ($validationHtmlParent -and -not (Test-Path -LiteralPath $validationHtmlParent)) {
-            New-Item -ItemType Directory -Force -Path $validationHtmlParent | Out-Null
-        }
-        Convert-MarkdownToHtmlDocument `
-            -MarkdownPath $ValidateReportPath `
-            -HtmlPath $ValidationHtmlOutputPath `
-            -Title ("인천교육청 언론보도 현황({0})" -f $reportDateStamp)
-        if (-not (Test-NonEmptyFile -Path $ValidationHtmlOutputPath)) {
-            throw "검증된 Markdown의 HTML 변환 결과가 비어 있습니다: $ValidationHtmlOutputPath"
-        }
-        Write-Output ("REPORT_HTML: {0}" -f $ValidationHtmlOutputPath)
+    try {
+        Write-ValidatedPreview $ValidateReportPath $ValidationHtmlOutputPath
+    } catch {
+        Write-Output "REPORT_VALIDATION: FAIL [$($_.Exception.Message)]"
+        exit 2
     }
     Write-Output "REPORT_VALIDATION: PASS"
     exit 0
-}
-
-$folderName = "인천교육청 언론보도 현황($reportDateStamp)"
-$reportDir = Join-Path $BasePath $folderName
-$markdownPath = Join-Path $reportDir "인천교육청 언론보도 현황.md"
-$htmlPath = Join-Path $reportDir "인천교육청 언론보도 현황.html"
-$persistedCollectedJsonPath = Join-Path $reportDir "collected_articles.json"
-$persistedVerifiedCollectedJsonPath = Join-Path $reportDir "verified_collected_articles.json"
-$verificationManifestPath = Join-Path $reportDir "verification-manifest.json"
-$verificationLogPath = Join-Path $reportDir "verification-promotion.log"
-$logPath = Join-Path $reportDir "run.log"
-$codexWorkRoot = Join-Path ([System.IO.Path]::GetTempPath()) "DailyNewsPickerCodexWork"
-# 고정 작업 폴더: 날짜별 폴더는 Codex 신뢰 목록([projects])에 매일 1건씩 쌓여 샌드박스 ACL 갱신을 비대화시킴
-$codexWorkDir = Join-Path $codexWorkRoot "current"
-$verifiedCollectedJsonPath = Join-Path $codexWorkDir "verified_collected_articles.json"
-
-if (-not (Test-Path $BasePath)) {
-    New-Item -ItemType Directory -Force -Path $BasePath | Out-Null
 }
 
 if (-not (Test-IsBusinessDay -Date $reportDate) -and -not $Force) {
@@ -878,20 +865,10 @@ if (-not (Test-IsBusinessDay -Date $reportDate) -and -not $Force) {
     exit 0
 }
 
-if ((Test-Path $markdownPath) -and (Test-Path $htmlPath) -and -not $Force) {
-    Write-Log "이미 오늘 결과가 존재합니다: $reportDir"
-    exit 0
-}
-
-New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
-New-Item -ItemType Directory -Force -Path $codexWorkDir | Out-Null
-# 고정 폴더 재사용: 이전 실행 산출물이 이번 실행 결과로 오인되지 않도록 제거
-Remove-Item -Path (Join-Path $codexWorkDir "last-message.md") -Force -ErrorAction SilentlyContinue
-Remove-Item -Path (Join-Path $codexWorkDir "collected_articles.json") -Force -ErrorAction SilentlyContinue
-Remove-Item -Path (Join-Path $codexWorkDir "verified_collected_articles.json") -Force -ErrorAction SilentlyContinue
-
-$prompt = @"
-Use `$daily-news-picker at C:\Users\홍주형\.codex\skills\daily-news-picker\SKILL.md.
+function New-EngineReport {
+    $skillFile = Join-Path (Split-Path $PSScriptRoot) 'SKILL.md'
+    $prompt = @"
+Use `$daily-news-picker at $skillFile.
 
 This run is an automated report generation job, not a conversation.
 Collect and rank today's news about 인천교육청 and produce the final report immediately.
@@ -935,6 +912,15 @@ Apply these rules:
 
 Write the final answer in Korean as a complete Markdown report ready to save directly to disk.
 The first line must be `# 인천교육청 언론보도 현황`.
+Put any "## 검증 메모" section before both machine blocks; nothing may appear between or after them.
+Provide the outlet check log immediately before the verification block:
+<!-- DAILY_NEWS_SOURCE_CHECKS
+{"incheonin.com":"checked_found","incheontoday.com":"checked_empty"}
+DAILY_NEWS_SOURCE_CHECKS -->
+Use all required domains in references/media-sources.md. Record checked_found for a completed search with hits,
+checked_empty for a completed search without hits, or failed for a failed or unfinished search. The example contains
+only two domains. Use the collector's source_checks when available. Search unchecked or failed domains individually;
+the marker records completed searches and failures. An incidental article match is not a domain check.
 For every collector candidate that you include after checking its article body, append this exact machine-readable
 block at the very end of the report (use [] when no collector candidate is verified for publication):
 <!-- DAILY_NEWS_VERIFIED_CANDIDATES
@@ -945,398 +931,133 @@ article body was checked and the candidate is included in the report. The verifi
 body evidence, not just repeat the title or say "관련 있음".
 "@
 
-$promptPath = Join-Path $reportDir "prompt.txt"
-[System.IO.File]::WriteAllText($promptPath, $prompt, $script:Utf8NoBom)
+    $prompt += Get-CandidatePoolInstructions $EngineWorkDir
+    $promptPath = Join-Path $reportDir 'prompt.txt'
+    [IO.File]::WriteAllText($promptPath, $prompt, $script:Utf8NoBom)
 
-if ($DryRun) {
-    Write-Log "DryRun 모드입니다."
-    Write-Log "저장 폴더: $reportDir"
-    Write-Log "Markdown: $markdownPath"
-    Write-Log "HTML: $htmlPath"
-    Write-Log "Prompt: $promptPath"
-    Write-Log "1차 수집기: $(Join-Path $PSScriptRoot 'collect_news_rss.py') (DryRun에서는 실행하지 않음)"
-    exit 0
-}
+    # 프롬프트는 argv가 아니라 stdin으로 전달한다 ("-" = stdin 읽기).
+    # argv 전달 시 npm .cmd 셔틀(cmd.exe)이 개행에서 프롬프트를 끊어 첫 줄만 도달하는
+    # 사고가 있었다 (2026-07-14~17 실측: 4개 실행 모두 'Apply these rules' 미전달 확인).
+    $argList = @(
+        "--search",
+        "exec",
+        "--skip-git-repo-check",
+        "-s", "read-only",
+        "-C", $codexWorkDir,
+        "-m", $Model,
+        "-o", (Join-Path $codexWorkDir "last-message.md"),
+        "-"
+    )
 
-# ---- 1차 수집: Google News RSS(+네이버 API 보강) 수집기 ----
-# 성공 시 후보 풀 JSON을 Codex 작업 폴더에 두고 프롬프트로 안내한다.
-# 실패·시간초과·0건이면 기존 방식(Codex 자체 검색)으로 폴백한다.
-$collectedJsonPath = Join-Path $codexWorkDir "collected_articles.json"
-$collectorPath = Join-Path $PSScriptRoot "collect_news_rss.py"
-$collectorUsed = $false
-$collectorCount = 0
-if (Test-Path $collectorPath) {
-    Write-RunLog -Path $logPath -Message "1차 수집기 실행: Google News RSS(+네이버 보강)"
-    $collectorStdout = Join-Path $reportDir "collector.stdout.log"
-    $collectorStderr = Join-Path $reportDir "collector.stderr.log"
-    $prevPyEnc = $env:PYTHONIOENCODING
-    $env:PYTHONIOENCODING = "utf-8"
+    $stdoutPath = Join-Path $reportDir "codex.stdout.log"
+    $stderrPath = Join-Path $reportDir "codex.stderr.log"
+    $process = $null
+    $timedOut = $false
+    $lastValidationFailures = @()
+
+    Write-RunLog -Path $logPath -Message ("설정: model={0}, bypass={1}, output={2}, codexWorkDir={3}, timeoutSeconds={4}" -f $Model, $DangerouslyBypassApprovalsAndSandbox.IsPresent, $reportDir, $codexWorkDir, $CodexTimeoutSeconds)
+
+    $gitBashPath = Set-GitBashEnvironment
+    if ($gitBashPath) {
+        Write-RunLog -Path $logPath -Message ("Git Bash 경로 고정: {0}" -f $gitBashPath)
+    } else {
+        Write-RunLog -Path $logPath -Message "Git Bash 경로를 찾지 못했습니다. 현재 PATH를 그대로 사용합니다."
+    }
+
+    if ($DangerouslyBypassApprovalsAndSandbox) {
+        $argList = @("--dangerously-bypass-approvals-and-sandbox") + $argList
+    }
+
     try {
-        $collectorArgs = @($collectorPath, "--start", $windowStartDisplay, "--end", $windowEndDisplay, "--out-dir", $codexWorkDir)
-        $quotedCollectorArgs = $collectorArgs | ForEach-Object {
-            if ($_ -match '\s|"') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
-        }
-        $collectorProcess = Start-Process -FilePath $PythonCommand -ArgumentList ([string]::Join(' ', $quotedCollectorArgs)) -RedirectStandardOutput $collectorStdout -RedirectStandardError $collectorStderr -PassThru -NoNewWindow
-        if (-not $collectorProcess.WaitForExit($CollectorTimeoutSeconds * 1000)) {
-            try { $collectorProcess.Kill($true) } catch { Stop-Process -Id $collectorProcess.Id -Force -ErrorAction SilentlyContinue }
-            try {
-                if ($collectorProcess.WaitForExit(5000)) {
-                    # Start-Process 리디렉션 파일 핸들이 닫힐 때까지 완료 대기
-                    $collectorProcess.WaitForExit()
-                }
-            } catch {
-                # 수집기 종료 확인 실패가 Codex 폴백을 막지 않도록 한다.
-            }
-            Write-RunLog -Path $logPath -Message "수집기 시간 초과 — Codex 자체 검색으로 폴백합니다."
-        } elseif ($collectorProcess.ExitCode -ne 0) {
-            Write-RunLog -Path $logPath -Message ("수집기 실패(exit {0}) — Codex 자체 검색으로 폴백합니다." -f $collectorProcess.ExitCode)
-        } elseif (Test-NonEmptyFile -Path $collectedJsonPath) {
-            $pool = Get-Content -Path $collectedJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($pool.article_count -ge 1) {
-                $collectorUsed = $true
-                $collectorCount = $pool.article_count
-                Copy-Item -Path $collectedJsonPath -Destination $persistedCollectedJsonPath -Force
-                Write-RunLog -Path $logPath -Message ("1차 수집 완료: {0}건 (수집 실패 쿼리 {1}건)" -f $pool.article_count, @($pool.failures).Count)
+        $quotedArgs = $argList | ForEach-Object {
+            if ($_ -match '\s|"') {
+                '"' + ($_ -replace '"', '\"') + '"'
             } else {
-                Write-RunLog -Path $logPath -Message "1차 수집 0건 — Codex 자체 검색으로 폴백합니다."
+                $_
             }
-        } else {
-            Write-RunLog -Path $logPath -Message "수집 결과 파일이 없습니다 — Codex 자체 검색으로 폴백합니다."
         }
-    } catch {
-        Write-RunLog -Path $logPath -Message ("수집기 실행 오류: {0} — Codex 자체 검색으로 폴백합니다." -f $_.Exception.Message)
-    } finally {
-        $env:PYTHONIOENCODING = $prevPyEnc
-        foreach ($tempLog in @($collectorStdout, $collectorStderr)) {
-            if (Test-Path $tempLog) {
+        $argumentString = [string]::Join(' ', $quotedArgs)
+
+        $reportReady = $false
+        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            Write-RunLog -Path $logPath -Message ("Codex 실행을 시작합니다. (시도 {0}/{1})" -f $attempt, $MaxAttempts)
+            $timedOut = $false
+            Remove-IfExists -Path (Join-Path $codexWorkDir "last-message.md")
+            $process = Start-Process -FilePath $CodexCommand -ArgumentList $argumentString -RedirectStandardInput $promptPath -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -NoNewWindow
+            if (-not $process.WaitForExit($CodexTimeoutSeconds * 1000)) {
+                $timedOut = $true
                 try {
-                    $tempLogText = [System.IO.File]::ReadAllText($tempLog, [System.Text.Encoding]::UTF8)
-                    if ($tempLogText) {
-                        [System.IO.File]::AppendAllText($logPath, $tempLogText, $script:Utf8NoBom)
-                    }
+                    $process.Kill($true)
                 } catch {
-                    Write-RunLog -Path $logPath -Message ("수집기 임시 로그 읽기 실패(비치명): {0}" -f $_.Exception.Message)
-                } finally {
-                    Remove-Item -Path $tempLog -Force -ErrorAction SilentlyContinue
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
                 }
+                throw "Codex 실행 시간 제한 초과"
             }
-        }
-    }
-} else {
-    Write-RunLog -Path $logPath -Message "수집기 스크립트가 없습니다 — Codex 자체 검색으로 진행합니다."
-}
 
-if (-not $collectorUsed) {
-    Remove-Item -Path $collectedJsonPath -Force -ErrorAction SilentlyContinue
-} else {
-    $prompt += @"
-
-Pre-collected candidate pool: your working directory contains ``collected_articles.json`` with $collectorCount candidate articles,
-produced by the skill's deterministic collector (Google News RSS primary + Naver API supplement) for exactly the check window above,
-with original media URLs already resolved.
-- Use it as the primary candidate pool. Do not redo broad first-pass collection from scratch.
-- Verify the relevance of every entry before including it. Entries with ``"engine": "naver-api"`` are unfiltered keyword matches and require an explicit relevance check.
-- Use ``relevance_hint`` only as triage metadata, never as the final decision. ``likely_irrelevant`` means the title has an Incheon location or clear commercial context but no education subject; ``needs_review`` preserves exact school names and low-context titles for body verification. Collector candidates carry ``publication_eligible: false`` by default; do not treat ``likely_relevant`` or ``needs_review`` as permission to publish before article-body verification.
-- Check the ``relevance_reasons``, ``location_hits``, ``education_subject_hits``, and ``student_story_hits`` fields and state a concrete inclusion relationship in your reasoning before selecting school/student items.
-- Check the ``failures`` field: queries listed there may be under-collected, so supplement those specific queries with targeted searches per the skill's recipes.
-- Still apply the skill's selection, deduplication, ranking, verification, and output rules to the pool.
-"@
-    [System.IO.File]::WriteAllText($promptPath, $prompt, $script:Utf8NoBom)
-}
-
-# 프롬프트는 argv가 아니라 stdin으로 전달한다 ("-" = stdin 읽기).
-# argv 전달 시 npm .cmd 셔틀(cmd.exe)이 개행에서 프롬프트를 끊어 첫 줄만 도달하는
-# 사고가 있었다 (2026-07-14~17 실측: 4개 실행 모두 'Apply these rules' 미전달 확인).
-$argList = @(
-    "--search",
-    "exec",
-    "--skip-git-repo-check",
-    "-s", "read-only",
-    "-C", $codexWorkDir,
-    "-m", $Model,
-    "-o", (Join-Path $codexWorkDir "last-message.md"),
-    "-"
-)
-
-$stdoutPath = Join-Path $reportDir "codex.stdout.log"
-$stderrPath = Join-Path $reportDir "codex.stderr.log"
-$generatedMarkdown = $null
-$generatedHtml = $null
-$process = $null
-$timedOut = $false
-$verificationFailed = $false
-$verifiedCandidateAvailable = $false
-$lastValidationFailures = @()
-
-Write-RunLog -Path $logPath -Message "STATUS: STARTED"
-Write-RunLog -Path $logPath -Message ("설정: model={0}, bypass={1}, output={2}, codexWorkDir={3}, timeoutSeconds={4}" -f $Model, $DangerouslyBypassApprovalsAndSandbox.IsPresent, $reportDir, $codexWorkDir, $CodexTimeoutSeconds)
-
-$gitBashPath = Set-GitBashEnvironment
-if ($gitBashPath) {
-    Write-RunLog -Path $logPath -Message ("Git Bash 경로 고정: {0}" -f $gitBashPath)
-} else {
-    Write-RunLog -Path $logPath -Message "Git Bash 경로를 찾지 못했습니다. 현재 PATH를 그대로 사용합니다."
-}
-
-if ($DangerouslyBypassApprovalsAndSandbox) {
-    $argList = @("--dangerously-bypass-approvals-and-sandbox") + $argList
-}
-
-try {
-    $quotedArgs = $argList | ForEach-Object {
-        if ($_ -match '\s|"') {
-            '"' + ($_ -replace '"', '\"') + '"'
-        } else {
-            $_
-        }
-    }
-    $argumentString = [string]::Join(' ', $quotedArgs)
-
-    $reportReady = $false
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        Write-RunLog -Path $logPath -Message ("Codex 실행을 시작합니다. (시도 {0}/{1})" -f $attempt, $MaxAttempts)
-        $timedOut = $false
-        $process = Start-Process -FilePath $CodexCommand -ArgumentList $argumentString -RedirectStandardInput $promptPath -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -NoNewWindow
-        if (-not $process.WaitForExit($CodexTimeoutSeconds * 1000)) {
-            $timedOut = $true
-            try {
-                $process.Kill($true)
-            } catch {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            if (Test-Path $stdoutPath) {
+                [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($stdoutPath, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
             }
-            throw "Codex 실행 시간 제한 초과"
-        }
-
-        if (Test-Path $stdoutPath) {
-            [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($stdoutPath, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
-        }
-        if (Test-Path $stderrPath) {
-            [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($stderrPath, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
-        }
-
-        $lastMessagePath = Join-Path $codexWorkDir "last-message.md"
-        $generatedMarkdown = if (Test-NonEmptyFile -Path $lastMessagePath) { Get-Item -LiteralPath $lastMessagePath } else { $null }
-        $generatedHtml = $null
-
-        if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $markdownPath) {
-            Copy-Item -Path $generatedMarkdown.FullName -Destination $markdownPath -Force
-        }
-
-        if ($generatedHtml -and $generatedHtml.FullName -ne $htmlPath) {
-            Copy-Item -Path $generatedHtml.FullName -Destination $htmlPath -Force
-        }
-
-        if (Test-NonEmptyFile -Path $markdownPath) {
-            Repair-MarkdownReport -Path $markdownPath
-        }
-
-        if (-not (Test-IsMarkdownReport -Path $markdownPath)) {
-            $generatedReportMarkdown = Get-GeneratedReportMarkdown -SearchDirs @($reportDir, $codexWorkDir)
-            if ($generatedReportMarkdown -and $generatedReportMarkdown.FullName -ne $markdownPath) {
-                Copy-Item -Path $generatedReportMarkdown.FullName -Destination $markdownPath -Force
+            if (Test-Path $stderrPath) {
+                [System.IO.File]::AppendAllText($logPath, [System.IO.File]::ReadAllText($stderrPath, [System.Text.Encoding]::UTF8), $script:Utf8NoBom)
             }
-        }
 
-        if (Test-NonEmptyFile -Path $markdownPath) {
-            Repair-MarkdownReport -Path $markdownPath
-        }
-
-        $lastValidationFailures = @(Get-MarkdownReportValidationFailures -Path $markdownPath)
-        if (($process.ExitCode -eq 0) -and ($lastValidationFailures.Count -eq 0)) {
-            $reportReady = $true
-            break
-        }
-
-        if ($attempt -lt $MaxAttempts) {
-            $retryReason = if ($process.ExitCode -ne 0) {
-                "exit code $($process.ExitCode)"
-            } else {
-                "보고서 검증 실패: $($lastValidationFailures -join ', ')"
+            $lastMessagePath = Join-Path $codexWorkDir "last-message.md"
+            if (Test-NonEmptyFile $lastMessagePath) {
+                Copy-Item -LiteralPath $lastMessagePath -Destination $markdownPath -Force
+                Repair-MarkdownReport -Path $markdownPath
             }
-            if (($process.ExitCode -eq 0) -and ($lastValidationFailures.Count -gt 0)) {
-                $retryPrompt = $prompt + @"
+            $lastValidationFailures = @(Get-MarkdownReportValidationFailures -Path $markdownPath)
+            if (($process.ExitCode -eq 0) -and ($lastValidationFailures.Count -eq 0)) {
+                $reportReady = $true
+                break
+            }
+
+            if ($attempt -lt $MaxAttempts) {
+                $retryReason = if ($process.ExitCode -ne 0) {
+                    "exit code $($process.ExitCode)"
+                } else {
+                    "보고서 검증 실패: $($lastValidationFailures -join ', ')"
+                }
+                if (($process.ExitCode -eq 0) -and ($lastValidationFailures.Count -gt 0)) {
+                    $retryPrompt = $prompt + @"
 
 이전 출력 검증 실패 항목: $($lastValidationFailures -join ', ')
 위 항목을 모두 수정한 전체 보고서를 다시 반환하세요. 특히 요구된 제목과 점검 범위를 정확히 유지하세요.
 "@
-                [System.IO.File]::WriteAllText($promptPath, $retryPrompt, $script:Utf8NoBom)
-            }
-            Write-RunLog -Path $logPath -Message ("시도 {0} 실패({1}). 부분 산출물 제거 후 재시도합니다." -f $attempt, $retryReason)
-            Remove-IfExists -Path $markdownPath
-            Remove-IfExists -Path $htmlPath
-            if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $lastMessagePath) { Remove-IfExists -Path $generatedMarkdown.FullName }
-            if ($generatedHtml) { Remove-IfExists -Path $generatedHtml.FullName }
-            Start-Sleep -Seconds 15
-        }
-    }
-
-    if (-not $reportReady) {
-        if ($process -and $process.ExitCode -ne 0) {
-            throw "Codex 실행 실패"
-        }
-        if (-not (Test-NonEmptyFile -Path $markdownPath)) {
-            throw "Markdown 결과가 비어 있거나 생성되지 않았습니다."
-        }
-        throw "Markdown 결과가 보고서 본문 형식이 아닙니다."
-    }
-
-    # ---- 본문 검증 후보 자동 승격 ----
-    # Codex의 구조화 검증 표식만 별도 산출 JSON으로 승격하고, 원본 후보 JSON은 그대로 보존한다.
-    # 수집기 폴백으로 후보 JSON이 없어도 helper를 호출해 내부 표식이 공개본에 남지 않게 한다.
-    $promotionScript = Join-Path $PSScriptRoot "promote_verified_candidates.py"
-    $candidateInputAvailable = $collectorUsed -and (Test-NonEmptyFile -Path $collectedJsonPath)
-    $promotionArgs = @(
-        $promotionScript,
-        "--report", $markdownPath,
-        "--output", $verifiedCollectedJsonPath,
-        "--manifest-output", $verificationManifestPath
-    )
-    if ($candidateInputAvailable) {
-        $promotionArgs = @(
-            $promotionScript,
-            "--input", $collectedJsonPath,
-            "--report", $markdownPath,
-            "--output", $verifiedCollectedJsonPath,
-            "--manifest-output", $verificationManifestPath
-        )
-    }
-    try {
-        Remove-IfExists -Path $verificationLogPath
-        & $PythonCommand @promotionArgs *> $verificationLogPath
-        $promotionExitCode = $LASTEXITCODE
-        if (($promotionExitCode -ne 0) -or (-not (Test-NonEmptyFile -Path $verifiedCollectedJsonPath))) {
-            $verificationFailed = $true
-            Write-RunLog -Path $logPath -Message ("본문 검증 후보 승격 실패(exit {0}) — 원본 후보는 비공개로 유지합니다: {1}" -f $promotionExitCode, $verificationLogPath)
-        } else {
-            Copy-Item -Path $verifiedCollectedJsonPath -Destination $persistedVerifiedCollectedJsonPath -Force
-            $verifiedCandidateAvailable = $candidateInputAvailable
-            $promotionSummary = Get-Content -Path $verificationLogPath -Raw -Encoding UTF8
-            Write-RunLog -Path $logPath -Message ("본문 검증 후보 승격 완료 — {0}" -f $promotionSummary.Trim())
-        }
-    } catch {
-        $verificationFailed = $true
-        Write-RunLog -Path $logPath -Message ("본문 검증 후보 승격 오류 — 원본 후보는 비공개로 유지합니다: {0}" -f $_.Exception.Message)
-    }
-
-    Convert-MarkdownToHtmlDocument -MarkdownPath $markdownPath -HtmlPath $htmlPath -Title $folderName
-
-    if (-not (Test-NonEmptyFile -Path $htmlPath)) {
-        throw "HTML 결과가 비어 있거나 생성되지 않았습니다."
-    }
-
-    # ---- 하류 자동 인제스트 (edu-news-organizer) ----
-    # SiteDir가 지정되었거나 공개 push가 요청된 경우 하류 산출물은 필수다.
-    $downstreamFailed = $false
-    $downstreamRequired = (-not [string]::IsNullOrWhiteSpace($SiteDir)) -or $EnablePublicPush
-    $organizerScript = Join-Path $env:USERPROFILE ".codex\skills\edu-news-organizer\scripts\newsdb.py"
-    if (Test-Path $organizerScript) {
-        $ingestLog = Join-Path $reportDir "organizer-ingest.log"
-        Remove-IfExists -Path $ingestLog
-        try {
-            $env:PYTHONIOENCODING = "utf-8"
-            # 이전 승인 흐름 유지: 브리핑을 먼저 넣고 후보 원본·메타데이터를 이어서 보존한다.
-            # 공개본은 브리핑 명시 기사와 본문 검증을 거쳐 명시적으로 승격된 후보만 사용한다.
-            $ingestJsonPath = if ($verifiedCandidateAvailable -and (Test-NonEmptyFile -Path $persistedVerifiedCollectedJsonPath)) {
-                $persistedVerifiedCollectedJsonPath
-            } elseif (Test-NonEmptyFile -Path $collectedJsonPath) {
-                $collectedJsonPath
-            } elseif ($collectorUsed -and (Test-NonEmptyFile -Path $persistedCollectedJsonPath)) {
-                $persistedCollectedJsonPath
-            } else {
-                $null
-            }
-            Invoke-LoggedNativeCommand -Step "브리핑 인제스트" -Command $PythonCommand `
-                -Arguments @($organizerScript, "ingest", "--briefing", $markdownPath) -LogPath $ingestLog
-            if ($ingestJsonPath) {
-                Invoke-LoggedNativeCommand -Step "후보 JSON 인제스트" -Command $PythonCommand `
-                    -Arguments @($organizerScript, "ingest", "--json", $ingestJsonPath) -LogPath $ingestLog
-            }
-            Invoke-LoggedNativeCommand -Step "동일보도 묶음" -Command $PythonCommand `
-                -Arguments @($organizerScript, "group", "--date", $reportDateDisplay) -LogPath $ingestLog
-            # 프리미엄 HTML 다이제스트를 보고 폴더에 함께 생성 (브리핑과 나란히)
-            $digestHtmlPath = Join-Path $reportDir "교육뉴스 다이제스트.html"
-            Invoke-LoggedNativeCommand -Step "HTML 다이제스트 생성" -Command $PythonCommand `
-                -Arguments @($organizerScript, "digest", "--date", $reportDateDisplay, "--format", "html", "--out", $digestHtmlPath) `
-                -LogPath $ingestLog
-            if (-not (Test-NonEmptyFile -Path $digestHtmlPath)) {
-                throw "HTML 다이제스트가 생성되지 않았습니다: $digestHtmlPath"
-            }
-            Write-RunLog -Path $logPath -Message "하류 인제스트·다이제스트 완료 (edu-news-organizer → organizer-ingest.log, 교육뉴스 다이제스트.html)"
-
-            # 정적 사이트 배포(A안): EDU_NEWS_SITE_DIR가 설정된 경우에만 공개 안전본을 굽고 git push
-            # (개인 데이터 제외·비공식 표기 — publish_site.py가 --public 렌더). 미설정 시 조용히 생략.
-            if ($env:EDU_NEWS_SITE_DIR) {
-                $publishScript = Join-Path $env:USERPROFILE ".codex\skills\edu-news-organizer\scripts\publish_site.py"
-                $prevPythonUtf8 = $env:PYTHONUTF8
-                try {
-                    $env:PYTHONUTF8 = "1"
-                    $publishArgs = @($publishScript, "--site-dir", $env:EDU_NEWS_SITE_DIR, "--date", $reportDateDisplay)
-                    if ($env:EDU_NEWS_SITE_PUSH -eq "1") {
-                        $publishArgs += "--push"
-                    }
-                    Invoke-LoggedNativeCommand -Step "정적 사이트 게시" -Command $PythonCommand `
-                        -Arguments $publishArgs -LogPath $ingestLog
-                    $archivePath = Join-Path $env:EDU_NEWS_SITE_DIR ("archive\{0}.html" -f $reportDateDisplay)
-                    if (-not (Test-NonEmptyFile -Path $archivePath)) {
-                        throw "날짜별 공개 아카이브가 생성되지 않았습니다: $archivePath"
-                    }
-                } finally {
-                    $env:PYTHONUTF8 = $prevPythonUtf8
+                    [System.IO.File]::WriteAllText($promptPath, $retryPrompt, $script:Utf8NoBom)
                 }
-                Write-RunLog -Path $logPath -Message ("정적 사이트 배포 완료 (공개 안전본 → {0}, push={1})" -f $env:EDU_NEWS_SITE_DIR, ($env:EDU_NEWS_SITE_PUSH -eq "1"))
+                Write-RunLog -Path $logPath -Message ("시도 {0} 실패({1}). 부분 산출물 제거 후 재시도합니다." -f $attempt, $retryReason)
+                Remove-IfExists -Path $markdownPath
+                Start-Sleep -Seconds 15
             }
-        } catch {
-            $downstreamFailed = $true
-            Write-RunLog -Path $logPath -Message ("하류 처리 실패(비치명): {0}" -f $_.Exception.Message)
         }
-    } else {
-        $message = "하류 구성요소 없음: $organizerScript"
-        if ($downstreamRequired) {
-            $downstreamFailed = $true
-            Write-RunLog -Path $logPath -Message $message
-        } else {
-            Write-RunLog -Path $logPath -Message ("{0} — 로컬 브리핑만 유지합니다." -f $message)
-        }
-    }
-    if ($downstreamFailed) {
-        Write-RunLog -Path $logPath -Message "STATUS: PARTIAL [DOWNSTREAM]"
-    } elseif ($verificationFailed) {
-        Write-RunLog -Path $logPath -Message "STATUS: PARTIAL [VERIFICATION]"
-    } else {
-        Write-RunLog -Path $logPath -Message "STATUS: SUCCEEDED"
-    }
-    Write-RunLog -Path $logPath -Message "생성 완료: $reportDir"
-    if (($downstreamFailed -or $verificationFailed) -and $downstreamRequired) {
-        exit 1
-    }
-}
-catch {
-    $exitCode = if ($timedOut) { 124 } elseif ($process) { $process.ExitCode } else { -1 }
-    $category = if ($timedOut) { "timeout" } else { Get-RunFailureCategory -ExitCode $exitCode -StdErrPath $stderrPath }
-    $summary = Get-RunFailureSummary -Category $category -ExitCode $exitCode -StdErrPath $stderrPath -ValidationFailures $lastValidationFailures
 
-    Remove-IfExists -Path $markdownPath
-    Remove-IfExists -Path $htmlPath
-    if ($collectorUsed -and (Test-NonEmptyFile -Path $persistedCollectedJsonPath)) {
-        Write-RunLog -Path $logPath -Message ("수집 후보 JSON 보존: {0}" -f $persistedCollectedJsonPath)
-    } else {
-        Remove-IfExists -Path $persistedCollectedJsonPath
+        if (-not $reportReady) {
+            if ($process -and $process.ExitCode -ne 0) {
+                throw "Codex 실행 실패"
+            }
+            if (-not (Test-NonEmptyFile -Path $markdownPath)) {
+                throw "Markdown 결과가 비어 있거나 생성되지 않았습니다."
+            }
+            throw "Markdown 결과가 보고서 본문 형식이 아닙니다."
+        }
+
     }
-    Remove-IfExists -Path $persistedVerifiedCollectedJsonPath
-    Remove-IfExists -Path $verificationManifestPath
-    Remove-IfExists -Path $verificationLogPath
-    if ($generatedMarkdown -and $generatedMarkdown.FullName -ne $lastMessagePath) {
-        Remove-IfExists -Path $generatedMarkdown.FullName
+    catch {
+        $exitCode = if ($timedOut) { 124 } elseif ($process) { $process.ExitCode } else { -1 }
+        $category = if ($timedOut) { "timeout" } else { Get-RunFailureCategory -ExitCode $exitCode -StdErrPath $stderrPath }
+        $summary = Get-RunFailureSummary -Category $category -ExitCode $exitCode -StdErrPath $stderrPath -ValidationFailures $lastValidationFailures
+
+        Write-RunLog -Path $logPath -Message ("STATUS: FAILED [{0}]" -f $category.ToUpperInvariant())
+        Write-RunLog -Path $logPath -Message ("원인: {0}" -f $summary)
+        throw "{0}. 로그: {1}" -f $summary, $logPath
     }
-    if ($generatedHtml) {
-        Remove-IfExists -Path $generatedHtml.FullName
+    finally {
+        Remove-IfExists -Path $stdoutPath
+        Remove-IfExists -Path $stderrPath
     }
 
-    Write-RunLog -Path $logPath -Message ("STATUS: FAILED [{0}]" -f $category.ToUpperInvariant())
-    Write-RunLog -Path $logPath -Message ("원인: {0}" -f $summary)
-    throw "{0}. 로그: {1}" -f $summary, $logPath
 }
-finally {
-    Remove-IfExists -Path $stdoutPath
-    Remove-IfExists -Path $stderrPath
-}
+
+$codexWorkDir = Join-Path ([IO.Path]::GetTempPath()) 'DailyNewsPickerCodexWork/current'
+Invoke-DailyReport -EngineWorkDir $codexWorkDir

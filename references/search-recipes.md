@@ -8,7 +8,7 @@
 - `{DS}` = 시작일 `YYYY.MM.DD` / `{DE}` = 종료일 `YYYY.MM.DD`
 - `{FROM}` = 시작일 `YYYYMMDD` / `{TO}` = 종료일 `YYYYMMDD`
 - 현재 예약 운영 창: 직전 업무일 09:00 이상 ~ 보고일 09:00 미만(KST). 월요일은 금요일 09:00 이후 주말 기사를 포함한다.
-- 명시적 `-CollectionTime`이 우선한다. 생략 시 Claude 실행기는 09:00, Codex 보조 실행기는 05:00을 사용한다. 수동 수집기의 `--start/--end`도 적용된 창과 동일하게 지정한다.
+- 명시적 `-CollectionTime`이 우선한다. 생략 시 Claude 실행기는 09:00, Codex 보조 실행기는 05:00을 사용한다. Python 수집기를 단독 실행하면 기본 마감은 09:00이며, 다른 창은 `--start`와 `--end`를 함께 지정한다.
 - 예약 실행 시각과 기사 마감 시각은 구분한다. 같은 `ReportDate`로 지연 실행해도 창의 끝을 실제 수집 완료 시각으로 늘리지 않는다. 등록 스크립트의 기본 05:00은 현재 예약의 명시적 09:00과 다르다. [운영 기록](./automation.md)을 참조한다.
 
 ## 0차 수집 엔진: Google News RSS (2026-07-17 실측 채택)
@@ -117,6 +117,7 @@ https://r.jina.ai/https://search.naver.com/search.naver?where=news&query={검색
 우리교육청이 참고하는 매체 풀이라는 의미이므로, 단순 예시가 아니라 수집 대상 도메인으로 취급한다.
 
 1차 쿼리 뒤에는 [media-sources.md](./media-sources.md)의 `Required Source-Seed Domains`를 확인한다.
+수집기에 `--coverage-roster references/media-sources.md`를 전달하면 도메인별 검색 결과와 근거가 후보 JSON에 기록된다. 검색 실패와 미점검 도메인은 직접 재검색하고, 남은 실패는 수집 미완료 보고서에 명시한다.
 이 단계의 목적은 `ice.go.kr` 보도자료가 아니라 언론사 원 기사 URL을 찾는 것이다.
 공식 교육청 페이지는 사실 확인과 원문 추적용으로만 쓰고, 외부 기사 링크가 있으면 대표 링크로 쓰지 않는다.
 
