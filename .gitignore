@@ -1,3 +1,4 @@
 cache/
 run.log
 *.tmp
+__pycache__/
